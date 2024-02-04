@@ -1,0 +1,5793 @@
+---
+title: "Data Analysis for: Forward genetics in Wolbachia: Regulation of Wolbachia proliferation by the amplification and deletion of an addictive genomic island"
+author: "Elves H Duarte & Luis Teixeira"
+date: '`r format(Sys.Date(), "%d %B, %Y")`'
+output:
+   pdf_document:
+    toc: true
+    toc_depth: 2  
+    fig_crop: false
+editor_options: 
+  chunk_output_type: console
+---
+
+# Global settings
+
+```{r in_use_packages}
+library(multcompView)
+library(tidyverse)
+library(lmerTest)
+library(reshape2)
+library(multcomp)
+library(emmeans)
+library(cluster)
+library(scales)
+library(coxme)
+library(car)
+```
+
+```{r built_in_functions, echo=FALSE}
+### the implementation of the Pfaffl method (Pfaffl, Nuc. Ac. Res. 2001, n29-9)
+qpcr.pfaffl = function(data = data,
+                       calibrator_sample = calibrator_sample,
+                       reference_gene = reference_gene,
+                       efficiency_target = efficiency_target,
+                       efficiency_ref = efficiency_ref)
+{
+  ### quality control
+  # raises an error if more than two genes in the dataset
+  if (length(levels(factor(data$gene))) > 2)
+    stop("Dataset with more than two genes. Subset you dataset before continuing.")
+  
+  # confirm that the 'Cts' variable is numeric
+  if (!is.numeric(data$cts))
+    stop("Variable with 'Cts' values is not numeric.")
+  
+  ### set the reference gene
+  data$gene = relevel(data$gene, ref = reference_gene)
+  target_gene <- levels(data$gene)[2]
+  
+  ### process reference gene dataset
+  reference_gene_dataset = data %>%
+    dplyr::filter(gene == reference_gene) %>%
+    dplyr::group_by(sample) %>%
+    dplyr::summarise(
+      reference_gene.Mean = mean(cts, na.rm = T),
+      reference_gene.Sd = sd(cts, na.rm = T)
+    )
+  
+  
+  ### estimate the median 'Cts' value of the reference gene for the calibrator samples
+  med_ref_gene_cal_sample = median(reference_gene_dataset$reference_gene.Mean[grepl(calibrator_sample, reference_gene_dataset$sample) ==
+                                                                                TRUE], na.rm = T)
+  
+  ### process target gene dataset
+  target_gene_dataset = data %>%
+    dplyr::filter(gene == target_gene) %>%
+    dplyr::group_by(sample) %>%
+    dplyr::summarise(
+      target_gene.Mean = mean(cts, na.rm = T),
+      target_gene.Sd = sd(cts, na.rm = T)
+    )
+  
+  ### estimate the median 'Cts' value of the target gene for the calibrator samples
+  med_target_gene_cal_sample = median(target_gene_dataset$target_gene.Mean[grepl(calibrator_sample, target_gene_dataset$sample) ==
+                                                                             TRUE], na.rm = T)
+  
+  ### merge the reference and the calibrator datasets
+  results_tmp = merge(reference_gene_dataset, target_gene_dataset, by =
+                        "sample")
+  
+  ### estimate the Deltas and fold changes
+  # formula: ratio=(Etarget^(dct(cont-sample)))/(Eref^dct(cont-sample))
+  results = results_tmp %>%
+    dplyr::mutate(
+      reference_gene.DCT = med_ref_gene_cal_sample - reference_gene.Mean,
+      target_gene.DCT = med_target_gene_cal_sample - target_gene.Mean,
+      fold_change = (efficiency_target ^ target_gene.DCT) /
+        (efficiency_ref ^ reference_gene.DCT)
+    )
+  
+  
+  ### estimate the median value of 'fold_change' for the calibrator samples
+  med_fold_change_cal_sample = median(results$fold_change[grepl(calibrator_sample, results$sample) ==
+                                                            TRUE], na.rm = T)
+  
+  ### normalize all to median of calibrator samples
+  results = results %>%
+    dplyr::mutate(normalized_fold_change = fold_change / med_fold_change_cal_sample)
+  
+  # changing the variable names
+  results <- results %>%
+    rename_at(vars(starts_with("reference_gene")), funs(str_replace(., "reference_gene", reference_gene))) %>%
+    rename_at(vars(starts_with("target_gene")), funs(str_replace(., "target_gene", target_gene)))
+  
+  ### returning the result
+  return(results)
+}
+
+
+### ggplot theme
+theme_figs = function()
+{
+  theme_bw() %+replace%
+    theme(
+      axis.text = element_text(colour = "black", size = 8),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      strip.text = element_text(size = 8),
+      panel.grid.major = element_line(linewidth = NA),
+      panel.grid.minor = element_line(linewidth = NA)
+    )
+}
+
+### by changing this value to "TRUE", R will save some files to the local system
+save_files <- FALSE
+```
+
+# S1 Fig \| Wolbachia recovery time
+
+```{r s1_fig :: wolbachia_recovery :: dataset_and_plot}
+### S1 data
+s1data = read.csv(
+  "Wolbachia_Example/original_data/S1 Data.csv",
+  na.strings = c("", "NA", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### wolbachia recovery over fly generations
+results_qpcr_wolb_recovery = s1data %>%
+  dplyr::group_by(fly_generation) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "T_0",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+
+### adding new variables
+results_qpcr_wolb_recovery = results_qpcr_wolb_recovery %>%
+  tidyr::separate(sample,
+                  c(NA, "tetracycline", "replicate", NA) ,
+                  sep = "_",
+                  remove = FALSE)
+
+
+### converting tetracycline variable to factor
+results_qpcr_wolb_recovery$tetracycline = factor(
+  results_qpcr_wolb_recovery$tetracycline,
+  levels = c("0", "1.5625", "3.125", "6.25", "12.5", "25", "50")
+)
+
+### plot
+ggplot(results_qpcr_wolb_recovery,
+       aes(x = factor(fly_generation), y = normalized_fold_change)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.25) +
+  facet_grid(replicate ~ tetracycline) +
+  #scale_y_continuous(name="", limits=c(0,NA), breaks=seq(0, 2,0.5))+
+  scale_x_discrete(name = "") +
+  theme_bw()
+```
+
+```{r s1_fig :: wolbachia_recovery :: analysis_and_final_figure}
+### titre range in generation 1 in treated flies
+results_qpcr_wolb_recovery %>%
+  dplyr::filter(fly_generation == 1 & tetracycline != "0") %>%
+  dplyr::select("normalized_fold_change") %>%
+  summary()
+
+### removing panels where flies do not recover
+results_qpcr_wolb_recovery_analysis <-
+  results_qpcr_wolb_recovery %>%
+  filter(!tetracycline %in% c("25", "50")) %>%
+  filter(!(tetracycline == "12.5" & replicate %in% c("B", "C"))) %>%
+  filter(!(tetracycline == "6.25" & replicate == "C"))
+         
+### the model
+model_wolb_recover_lmer = lmer(normalized_fold_change ~ fly_generation * tetracycline + (1 | replicate),                               data = results_qpcr_wolb_recovery_analysis)
+
+#this leads to a singular fit indicate no variance associated with replicates
+model_wolb_recover_lmer2 = lm(fold_change ~ fly_generation * tetracycline, data = results_qpcr_wolb_recovery_analysis)
+
+# significance of the model 
+Anova(model_wolb_recover_lmer2)
+
+# summary
+summary(model_wolb_recover_lmer2, cor=FALSE) 
+
+# multiple comparison
+multiple_comparison_wolb_recovery = emmeans::emmeans(model_wolb_recover_lmer2,
+                                                     ~ tetracycline | fly_generation,
+                                                     at = list(fly_generation = c(1:4)))
+#
+contrast(multiple_comparison_wolb_recovery, "trt.vs.ctrl", adj="holm")
+
+
+### final plot
+(
+  s1fig = ggplot(results_qpcr_wolb_recovery, aes(
+    x = factor(fly_generation), y = fold_change
+  )) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.3, size = 0.5) +
+    facet_grid(replicate ~ tetracycline) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, NA),
+      breaks = seq(0, 2, 0.5)
+    ) +
+    scale_x_discrete(name = "") +
+    theme_figs()
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S1 Fig.pdf",
+    plot = s1fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 650 / 96,
+    height = 350 / 96
+  )
+}
+```
+
+# S2 Fig \| Effect EMS females fecundity and Wolbachia titers
+
+## S2A-B Fig \| Effect on fecundity
+
+```{r s2_fig :: effect_ems_females_fecundity :: dataset_and_plot}
+### S2 Data
+s2data = read.csv("Wolbachia_Example/original_data/S2 Data.csv")
+
+### number of eggs and adults per EMS treatment per individual fly (replicate=fly in table)
+eff_ems_fecundity = dplyr::group_by(s2data, ems_doses, replicate) %>%
+  dplyr::summarise(
+    sum_number_eggs = sum(number_eggs, na.rm = TRUE),
+    sum_number_adults = sum(number_adults, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# plot :: number of eggs
+ggplot(eff_ems_fecundity,
+       aes(x = ems_doses, y = sum_number_eggs, group = ems_doses)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.25, height = 0) +
+  scale_y_continuous(name = "",
+                     breaks = seq(0, 200, 25)) +
+  scale_x_continuous(
+    name = "",
+    breaks = c(0, 12.5, 25, 50, 100, 200),
+    labels = c(0, 12.5, 25, 50, 100, 200)
+  ) +
+  theme_bw()
+
+# plot :: number of adults
+ggplot(eff_ems_fecundity,
+       aes(x = ems_doses, y = sum_number_adults, group = ems_doses)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 2, height = 0) +
+  scale_y_continuous(name = "",
+                     breaks = seq(0, 150, 25)) +
+  scale_x_continuous(
+    name = "",
+    breaks = c(0, 12.5, 25, 50, 100, 200),
+    labels = c(0, 12.5, 25, 50, 100, 200)
+  ) +
+  theme_bw()
+```
+
+```{r figure_s2 :: effect_ems_females_fecundity :: analysis_and_final_figure, echo=FALSE}
+### statistical analysis
+## number of eggs
+model_eff_ems_eggs = lm(sum_number_eggs ~ log(ems_doses + 1), data = eff_ems_fecundity)
+
+# significance of the model
+car::Anova(model_eff_ems_eggs)
+
+# summary of the model
+summary(model_eff_ems_eggs)
+
+## number of adults
+model_eff_ems_adults = lm(sum_number_adults ~ log(ems_doses + 1), data =
+                            eff_ems_fecundity)
+
+# significance of the model
+car::Anova(model_eff_ems_adults)
+
+# summary of the model
+summary(model_eff_ems_adults)
+
+
+### Predicting data using the models
+#  Effect EMS on the number of eggs
+eff_ems_eggs_pred <-
+  data.frame(
+    prediction = predict(model_eff_ems_eggs, newdata = eff_ems_fecundity),
+    ems_doses = eff_ems_fecundity$ems_doses
+  )
+
+#  Effect EMS on the number of adults
+eff_ems_adults_pred <-
+  data.frame(
+    prediction = predict(model_eff_ems_adults, newdata = eff_ems_fecundity),
+    ems_doses = eff_ems_fecundity$ems_doses
+  )
+
+
+### plots
+## plot :: number of eggs
+(
+  s2afig = ggplot(eff_ems_fecundity, aes(x = ems_doses, y = sum_number_eggs)) +
+    geom_boxplot(aes(group = ems_doses), outlier.shape = NA) +
+    geom_jitter(
+      width = 2.5,
+      height = 0,
+      size = 0.5
+    ) +
+    stat_summary(
+      data = eff_ems_eggs_pred,
+      aes(x = ems_doses, y = prediction),
+      fun = "mean",
+      colour = "red",
+      geom = "line",
+      linetype = "dashed"
+    ) +
+    scale_y_continuous(
+      name = "",
+      limits = c(-1, 162),
+      breaks = seq(0, 160, 40)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = c(0, 50, 100, 200),
+      labels = c(0, 50, 100, 200)
+    ) +
+    theme_figs()
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig S2A.pdf",
+    plot = s2afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 220 / 96,
+    height = 120 / 96
+  )
+}
+
+
+## plot :: number of adults
+(
+  s2bfig = ggplot(eff_ems_fecundity, aes(x = ems_doses, y = sum_number_adults)) +
+    geom_boxplot(aes(group = ems_doses), outlier.shape = NA) +
+    geom_jitter(
+      width = 2.5,
+      height = 0,
+      size = 0.5
+    ) +
+    stat_summary(
+      data = eff_ems_adults_pred,
+      aes(x = ems_doses, y = prediction),
+      fun = "mean",
+      colour = "red",
+      geom = "line",
+      linetype = "dashed"
+    ) +
+    scale_y_continuous(
+      name = "",
+      limits = c(-1, 162),
+      breaks = seq(0, 160, 40)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = c(0, 50, 100, 200),
+      labels = c(0, 50, 100, 200)
+    ) +
+    theme_figs()
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig S2B.pdf",
+    plot = s2bfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 220 / 96,
+    height = 120 / 96
+  )
+}
+```
+
+## S2C Fig \| Effect on Wolbachia titers (experiment 1)
+
+```{r s2fig :: effect_ems_wolbachia :: dataset_and_plot}
+### S3 Data
+s3data = read.csv("Wolbachia_Example/original_data/S3 Data.csv",
+                  stringsAsFactors = TRUE)
+
+### determining relative wolbachia titers
+results_qpcr_ems_wolb = qpcr.pfaffl(
+  data = s3data,
+  calibrator_sample = "E_0",
+  reference_gene = "RPL32",
+  efficiency_ref = 2,
+  efficiency_target = 2
+)
+
+### adding new variables
+results_qpcr_ems_wolb = results_qpcr_ems_wolb %>%
+  tidyr::separate(sample,
+                  c(NA, "ems_doses", "replicate") ,
+                  sep = "_",
+                  remove = FALSE)
+
+# adding a numeric variable for EMS doses
+results_qpcr_ems_wolb$ems_doses_num = as.numeric(as.character(results_qpcr_ems_wolb$ems_doses))
+
+### plot
+ggplot(results_qpcr_ems_wolb,
+       aes(x = ems_doses_num, y = normalized_fold_change)) +
+  geom_point() +
+  theme_bw()
+
+ggplot(results_qpcr_ems_wolb, aes(x = log(ems_doses_num + 1), y = normalized_fold_change)) +
+  geom_point() +
+  theme_bw()
+```
+
+```{r s2_fig :: effect_ems_wolbachia :: analysis_and_final_figure}
+### statistical analysis
+## Wolbachia loads
+model_eff_ems_wolb = nls(
+  normalized_fold_change ~ exp(-b * ems_doses_num) + c,
+  data = results_qpcr_ems_wolb,
+  start = list(b = 0.003, c = 0.26)
+)
+
+# summary of the model
+summary(model_eff_ems_wolb)
+
+### Predicting data using the models
+# Wolbachia loads
+eff_ems_wolb_titers_pred <-
+  data.frame(
+    prediction = predict(model_eff_ems_wolb, newdata = results_qpcr_ems_wolb),
+    ems_doses = results_qpcr_ems_wolb$ems_doses_num
+  )
+
+
+### plot
+## Relative Wolbachia titer
+(
+  s2cfig = ggplot(
+    results_qpcr_ems_wolb,
+    aes(x = ems_doses_num, y = normalized_fold_change)
+  ) +
+    geom_boxplot(aes(group = ems_doses), outlier.shape = NA) +
+    geom_jitter(width = 2.5, size = 0.5) +
+    stat_summary(
+      data = eff_ems_wolb_titers_pred,
+      aes(x = ems_doses, y = prediction),
+      fun = "mean",
+      colour = "red",
+      geom = "line",
+      linetype = "dashed"
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = c(0, 50, 100, 200),
+      labels = c(0, 50, 100, 200)
+    ) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 1.5),
+      breaks = seq(0, 1.25, 0.5)
+    ) +
+    theme_figs()
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S2C Fig.pdf",
+    plot = s2cfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 220 / 96,
+    height = 120 / 96
+  )
+}
+```
+
+## S2D Fig \| Effet on Wolbachia titers (experiment 2)
+
+```{r s2_fig :: effect_high_ems_wolbachia :: dataset_and_plot}
+### S4 Data
+s4data = read.csv("Wolbachia_Example/original_data/S4 Data.csv",
+                  stringsAsFactors = TRUE)
+
+### determining relative wolbachia titers
+results_qpcr_high_ems_wolb = qpcr.pfaffl(
+  data = s4data,
+  calibrator_sample = "E_0",
+  reference_gene = "RPL32",
+  efficiency_ref = 2,
+  efficiency_target = 2
+)
+
+### adding new variables
+results_qpcr_high_ems_wolb = results_qpcr_high_ems_wolb %>%
+  tidyr::separate(sample,
+                  c(NA, "ems_doses", "replicate") ,
+                  sep = "_",
+                  remove = FALSE)
+
+# adding a numeric variable for EMS doses
+results_qpcr_high_ems_wolb$ems_doses_num = as.numeric(as.character(results_qpcr_high_ems_wolb$ems_doses))
+
+#summarize data
+results_qpcr_high_ems_wolb %>%
+  group_by(ems_doses_num) %>%
+  dplyr::summarise(mean = mean(normalized_fold_change))
+
+
+### plot
+ggplot(results_qpcr_high_ems_wolb,
+       aes(x = ems_doses_num, y = normalized_fold_change)) +
+  geom_point() +
+  scale_y_continuous(
+    name = "",
+    limits = c(0, 1.7),
+    breaks = seq(0, 1.5, 0.25)
+  ) +
+  theme_bw()
+```
+
+```{r s2_fig :: effect_high_ems_wolbachia :: analysis_and_final_figure}
+### statistical analysis
+## Wolbachia loads
+model_eff_high_ems_wolb = nls(
+  normalized_fold_change ~ exp(-b * ems_doses_num) + c,
+  data = results_qpcr_high_ems_wolb,
+  start = list(b = 0.001, c = 0.25)
+)
+
+# summary of the model
+summary(model_eff_high_ems_wolb)
+
+
+### Predicting data using the models
+# Wolbachia loads
+eff_high_ems_wolb_titers_pred <-
+  data.frame(
+    prediction = predict(model_eff_high_ems_wolb, newdata = results_qpcr_high_ems_wolb),
+    ems_doses = results_qpcr_high_ems_wolb$ems_doses_num
+  )
+
+### plot
+## Relative Wolbachia titre
+(
+  s2dfig = ggplot(
+    results_qpcr_high_ems_wolb,
+    aes(x = ems_doses_num, y = normalized_fold_change)
+  ) +
+    geom_boxplot(aes(group = ems_doses_num), outlier.shape = NA) +
+    geom_jitter(size = 0.5) +
+    stat_summary(
+      data = eff_high_ems_wolb_titers_pred,
+      aes(x = ems_doses, y = prediction),
+      fun = "mean",
+      colour = "red",
+      geom = "line",
+      linetype = "dashed"
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = c(0, 2000, 4000, 8000),
+      labels = c(0, 2000, 4000, 8000)
+    ) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 1.7),
+      breaks = seq(0, 1.5, 0.5)
+    ) +
+    theme_figs()
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S2D Fig.pdf",
+    plot = s2dfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 220 / 96,
+    height = 120 / 96
+  )
+}
+```
+
+# Fig 1 \| Isolation over-proliferative Wolbachia variants
+
+## Fig 1A \| Isolation Line 1A :: wMelPop2
+
+```{r fig_1 :: isolation_line_1A :: statistics_and_final_figure}
+### S5 Data
+s5data = read.csv(
+  "Wolbachia_Example/original_data/S5 Data.csv",
+  sep = "",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining the relative Wolbachia titres
+results_isolation_line1A = group_by(s5data, fly_generations) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "C_Y",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_isolation_line1A = results_isolation_line1A %>%
+  tidyr::separate(
+    sample,
+    c(
+      "line",
+      "reference",
+      "keep_samples",
+      "selected",
+      "female",
+      "replicate"
+    ),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  rowwise() %>%
+  dplyr::mutate(overproliferative = "L_D" %in% paste0(line, "_", female)) %>%
+  dplyr::filter(keep_samples == "Y")
+
+
+### plot
+(
+  fig1a = ggplot(
+    results_isolation_line1A,
+    aes(x = factor(fly_generations), y = normalized_fold_change)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(color = overproliferative),
+      width = 0.1,
+      size = 0.5
+    ) +
+    facet_grid(. ~ line) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 10),
+      breaks = seq(0, 10, 2)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#b30098")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 1A.pdf",
+    plot = fig1a,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 260 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## Fig 1B \| Isolation Line 2A :: wMelOctoless
+
+```{r fig_1 :: isolation_line_2A :: statistics_and_final_figure}
+### S6 Data
+s6data = read.csv(
+  "Wolbachia_Example/original_data/S6 Data.csv",
+  sep = "",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining the relative Wolbachia titres
+results_isolation_line2a = group_by(s6data, fly_generations) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "C_Y",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_isolation_line2a = results_isolation_line2a %>%
+  tidyr::separate(
+    sample,
+    c(
+      "line",
+      "reference",
+      "keep_samples",
+      "selected",
+      "female",
+      "replicate"
+    ),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  rowwise() %>%
+  dplyr::mutate(overproliferative = "L_B" %in% paste0(line, "_", female)) %>%
+  dplyr::filter(keep_samples == "Y")
+
+
+### plot
+(
+  fig2a = ggplot(
+    results_isolation_line2a,
+    aes(x = factor(fly_generations), y = normalized_fold_change)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(color = overproliferative),
+      width = 0.1,
+      size = 0.5
+    ) +
+    facet_grid(. ~ line) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 30),
+      breaks = seq(0, 30, 5)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#e69f00")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 2A.pdf",
+    plot = fig2a,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 260 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## Fig 1C \| Wolbachia titres isogenic genetic background
+
+```{r fig_1 :: wolbachia_titers_after_isogenization :: statistics_and_final_figure}
+### S7 Data
+
+s7data = read.csv(
+  "Wolbachia_Example/original_data/S7 Data.csv",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining relative wolbachia titres
+results_qpcr_titers_iso = qpcr.pfaffl(
+  data = s7data,
+  calibrator_sample = "Control",
+  reference_gene = "RPL32",
+  efficiency_ref = 2,
+  efficiency_target = 2
+)
+
+### adding new variables
+results_qpcr_titers_iso = results_qpcr_titers_iso %>%
+  tidyr::separate(sample,
+                  c("line", "female", "replicate"),
+                  sep = "_",
+                  remove = FALSE)
+
+
+### the statistics
+## the model
+model_titers_iso = lm(normalized_fold_change ~ line, data = results_qpcr_titers_iso)
+
+# significance of the model
+car::Anova(model_titers_iso)
+
+# summary
+summary(model_titers_iso)
+
+## multiple comparison
+model_titers_iso_multcomp = emmeans::emmeans(model_titers_iso, ~ line)
+#
+contrast(model_titers_iso_multcomp, "trt.vs.ctrl", adj = "holm")
+
+### plot
+(
+  fig1c = ggplot(
+    results_qpcr_titers_iso,
+    aes(x = line, y = normalized_fold_change, color = line)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.1, size = 0.5) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 23),
+      breaks = seq(0, 20, 5)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#b30098", "#e69f00")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 1C.pdf",
+    plot = fig1c,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 160 / 96,
+    height = 170 / 96
+  )
+}
+```
+
+## S3A Fig \| Isolation Line 2B
+
+```{r s3_fig :: isolation_line_2B :: statistics_and_final_figure}
+### S8 Data
+
+s8data = read.csv(
+  "Wolbachia_Example/original_data/S8 Data.csv",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining the relative Wolbachia titers
+results_isolation_line2b = group_by(s8data, fly_generations) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "C_Y",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_isolation_line2b = results_isolation_line2b %>%
+  tidyr::separate(
+    sample,
+    c(
+      "line",
+      "reference",
+      "keep_samples",
+      "selected",
+      "female",
+      "replicate"
+    ),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  rowwise() %>%
+  dplyr::mutate(overproliferative = "L_A" %in% paste0(line, "_", female)) %>%
+  dplyr::filter(keep_samples == "Y")
+
+
+### plot
+(
+  s3afig = ggplot(results_isolation_line2b, aes(
+    x = factor(fly_generations), y = fold_change
+  )) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(color = overproliferative),
+      width = 0.1,
+      size = 0.5
+    ) +
+    facet_grid(. ~ line) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 40),
+      breaks = seq(0, 40, 5)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#9a6a00")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S3A Fig.pdf",
+    plot = s3afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 260 / 96,
+    height=180/96)
+}
+```
+
+## S3B Fig \| Isolation Line 3A :: wMelOctoless2
+
+```{r s3_fig :: isolation_line_3A :: statistics_and_final_figure}
+### S9 Data
+
+s9data = read.csv(
+  "Wolbachia_Example/original_data/S9 Data.csv",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining the relative Wolbachia titers
+results_isolation_line3a = group_by(s9data, fly_generations) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "C_Y",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_isolation_line3a = results_isolation_line3a %>%
+  tidyr::separate(
+    sample,
+    c(
+      "line",
+      "reference",
+      "keep_samples",
+      "selected",
+      "female",
+      "replicate"
+    ),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  rowwise() %>%
+  dplyr::mutate(overproliferative = "L_G" %in% paste0(line, "_", female)) %>%
+  dplyr::filter(keep_samples == "Y")
+
+
+### plot
+(
+  s3bfig = ggplot(
+    results_isolation_line3a,
+    aes(x = factor(fly_generations), y = normalized_fold_change)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(color = overproliferative),
+      width = 0.1,
+      size = 0.5
+    ) +
+    facet_grid(. ~ line) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 50),
+      breaks = seq(0, 50, 10)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#993300")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S3B Fig.pdf",
+    plot = s3bfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 240 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## S3C Fig \| Isolation Line 3B
+
+```{r s3_fig :: isolation_line_3B :: statistics_and_final_figure}
+### S10 Data
+s10data = read.csv(
+  "Wolbachia_Example/original_data/S10 Data.csv",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining the relative Wolbachia titres
+results_isolation_line3b = group_by(s10data, fly_generations) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "C_Y",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_isolation_line3b = results_isolation_line3b %>%
+  tidyr::separate(
+    sample,
+    c(
+      "line",
+      "reference",
+      "keep_samples",
+      "selected",
+      "female",
+      "replicate"
+    ),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  rowwise() %>%
+  dplyr::mutate(overproliferative = "L_A" %in% paste0(line, "_", female)) %>%
+  dplyr::filter(keep_samples == "Y")
+
+
+### plot
+(
+  s3cfig = ggplot(
+    results_isolation_line3b,
+    aes(x = factor(fly_generations), y = normalized_fold_change)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(color = overproliferative),
+      width = 0.1,
+      size = 0.5
+    ) +
+    facet_grid(. ~ line) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 83),
+      breaks = seq(0, 80, 10)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#ad5b32")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S3C Fig.pdf",
+    plot = s3cfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 240 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## S3D Fig \| Isolation Line 3C
+
+```{r s3_fig :: isolation_line_3C :: statistics_and_final_figure}
+### S11 Data
+
+s11data = read.csv(
+  "Wolbachia_Example/original_data/S11 Data.csv",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining the relative Wolbachia titers
+results_isolation_line3c = group_by(s11data, fly_generations) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "C_Y",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_isolation_line3c = results_isolation_line3c %>%
+  tidyr::separate(
+    sample,
+    c(
+      "line",
+      "reference",
+      "keep_samples",
+      "selected",
+      "female",
+      "replicate"
+    ),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  rowwise() %>%
+  dplyr::mutate(overproliferative = "L_I" %in% paste0(line, "_", female)) %>%
+  dplyr::filter(keep_samples == "Y")
+
+
+### plot
+(
+  s3dfig = ggplot(
+    results_isolation_line3c,
+    aes(x = factor(fly_generations), y = normalized_fold_change)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(
+      aes(color = overproliferative),
+      width = 0.1,
+      size = 0.5
+    ) +
+    facet_grid(. ~ line) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 20),
+      breaks = seq(0, 20, 4)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#c18466")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S3D Fig.pdf",
+    plot = s3dfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 240 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+# S5 Fig \| Characterization of wMelOctoless2
+
+```{r s5fig :: characterization_octoless2 :: analysis_and_final_figure}
+### S12 Data
+s12data = read.csv(
+  "Wolbachia_Example/original_data/S12 Data.csv",
+  na.strings = c("", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### determining relative wolbachia titers
+results_qpcr_titers_octoless2 = qpcr.pfaffl(
+  data = s12data,
+  calibrator_sample = "Cal-wMelCS-b",
+  reference_gene = "RPL32",
+  efficiency_ref = 2,
+  efficiency_target = 2
+)
+
+### adding new variables
+results_qpcr_titers_octoless2 = results_qpcr_titers_octoless2 %>%
+  tidyr::separate(
+    sample,
+    c("wolbachia", "time_point", "replicate"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  dplyr::filter(wolbachia != "Cal-wMelCS-b") %>%
+  dplyr::mutate(days = as.numeric(as.character(time_point)))
+
+
+### the statistics
+## titre on day 0
+model_titer_octoless2_day0 = lm(
+  normalized_fold_change ~ wolbachia,
+  data = dplyr::filter(results_qpcr_titers_octoless2, days == 0)
+)
+
+# significance of the model
+car::Anova(model_titer_octoless2_day0)
+
+# summary
+summary(model_titer_octoless2_day0)
+
+# multiple comparison
+(
+  multiple_titer_octoless2_day0 = emmeans::emmeans(model_titer_octoless2_day0, pairwise ~
+                                                     wolbachia, adj = "holm")
+)
+#
+multcomp::cld(multiple_titer_octoless2_day0$emmeans, adj = "holm")
+
+## proliferation
+model_titers_octoless2 = lm(normalized_fold_change ~ wolbachia * days, data =
+                              results_qpcr_titers_octoless2)
+
+# significance of the model
+car::Anova(model_titers_octoless2)
+
+# summary
+summary(model_titers_octoless2)
+
+## multiple comparison
+## multiple comparison
+(
+  multiple_model_titers_octoless2 = emmeans::lstrends(
+    model_titers_octoless2,
+    pairwise ~ wolbachia,
+    var = "days",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multiple_model_titers_octoless2$lstrends, adj = "holm")
+
+### plot
+(
+  s5fig = ggplot(
+    results_qpcr_titers_octoless2,
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.1, size = 0.5) +
+    facet_grid(. ~ wolbachia) +
+    scale_y_continuous(
+      name = "",
+      limits = c(0, 25),
+      breaks = seq(0, 25, 5)
+    ) +
+    scale_x_discrete(name = "") +
+    scale_color_manual(values = c("#000000", "#e69f00", "#993300ff")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S5 Fig.pdf",
+    plot = s5fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 450 / 96,
+    height = 200 / 96
+  )
+}
+```
+
+# S6 Fig \| Confirmation Octomom copy number variantion
+
+```{r s6_fig :: octomom_copy_number_new_variants :: dataset_and_plot}
+### S13 Data
+
+s13data = read.csv(
+  "Wolbachia_Example/original_data/S13 Data.csv",
+  na.strings = c("", "Undetermined", "NA"),
+  stringsAsFactors = TRUE
+)
+
+### determining copy number of individual Octomom genes
+# WD0505
+wd505_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0505")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0507
+wd507_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0507")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0508
+wd508_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0508")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0509
+wd509_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0509")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0510
+wd510_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0510")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0511
+wd511_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0511")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0512
+wd512_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0512")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0513
+wd513_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0513")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0514
+wd514_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0514")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# WD0519
+wd519_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                         gene == "WD0519")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+# rpoD
+rpod_qpcr_results = droplevels(subset(s13data, gene == "WSP" |
+                                        gene == "rpoD")) %>%
+  qpcr.pfaffl(
+    data = .,
+    calibrator_sample = "wMelCS-b",
+    reference_gene = "WSP",
+    efficiency_ref = 2,
+    efficiency_target = 2
+  )
+
+
+### merging the results (only sample names and fold change)
+results_qpcr_copies_octomom_genes = data.frame(
+  rbind(
+    wd505_qpcr_results[, c(1, 8, 9)],
+    wd507_qpcr_results[, c(1, 8, 9)],
+    wd508_qpcr_results[, c(1, 8, 9)],
+    wd509_qpcr_results[, c(1, 8, 9)],
+    wd510_qpcr_results[, c(1, 8, 9)],
+    wd511_qpcr_results[, c(1, 8, 9)],
+    wd512_qpcr_results[, c(1, 8, 9)],
+    wd513_qpcr_results[, c(1, 8, 9)],
+    wd514_qpcr_results[, c(1, 8, 9)],
+    wd519_qpcr_results[, c(1, 8, 9)],
+    rpod_qpcr_results[, c(1, 8, 9)]
+  ),
+  gene = rep(
+    c(
+      "WD0505",
+      "WD0507",
+      "WD0508",
+      "WD0509",
+      "WD0510",
+      "WD0511",
+      "WD0512",
+      "WD0513",
+      "WD0514",
+      "WD0519",
+      "rpoD"
+    ),
+    each = 15
+  )
+)
+
+# converting variables to factor
+results_qpcr_copies_octomom_genes$gene = factor(
+  results_qpcr_copies_octomom_genes$gene,
+  levels = c(
+    "WD0505",
+    "WD0507",
+    "WD0508",
+    "WD0509",
+    "WD0510",
+    "WD0511",
+    "WD0512",
+    "WD0513",
+    "WD0514",
+    "WD0519",
+    "rpoD"
+  )
+)
+
+
+### processing
+results_qpcr_copies_octomom_genes = results_qpcr_copies_octomom_genes %>%
+  tidyr::separate(sample,
+                  c("wolbachia", "replicate"),
+                  sep = "_",
+                  remove = FALSE)
+
+# replacing 'NaN' on wMelOctoless to '0'
+results_qpcr_copies_octomom_genes$fold_change[results_qpcr_copies_octomom_genes$wolbachia ==
+                                                "wMelOctoless" &
+                                                is.nan(results_qpcr_copies_octomom_genes$fold_change)] = 0
+#
+results_qpcr_copies_octomom_genes$normalized_fold_change[results_qpcr_copies_octomom_genes$wolbachia ==
+                                                           "wMelOctoless" &
+                                                           is.nan(results_qpcr_copies_octomom_genes$normalized_fold_change)] = 0
+
+### plot
+ggplot(results_qpcr_copies_octomom_genes,
+       aes(x = wolbachia, y = normalized_fold_change)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 0.5) +
+  facet_wrap( ~ gene, scales = "free_y") +
+  theme_bw()
+```
+
+```{r s6_fig :: octomom_copy_number_new_variants :: final_figure}
+### plots
+## WD0505
+(
+  s6fig_505 = ggplot(
+    dplyr::filter(results_qpcr_copies_octomom_genes,
+                  gene == "WD0505"),
+    aes(x = wolbachia, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(outlier.shape = NA, size = 0.5) +
+    geom_jitter(size = 0.5, width = 0.15) +
+    scale_color_manual(values = c("#000000", "#e69f00", "#b30098")) +
+    scale_y_continuous(limits = c(-0.05, 1.23), breaks = seq(0, 1.5, 0.5)) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0505.pdf", plot=s6fig_505, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0507
+(s6fig_507=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0507"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0507.pdf", plot=s6fig_507, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0508
+(s6fig_508=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0508"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0508.pdf", plot=s6fig_508, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0509
+(s6fig_509=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0509"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0509.pdf", plot=s6fig_509, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0510
+(s6fig_510=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0510"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0510.pdf", plot=s6fig_510, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0511
+(s6fig_511=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0511"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0511.pdf", plot=s6fig_511, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0512
+(s6fig_512=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0512"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0512.pdf", plot=s6fig_512, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0513
+(s6fig_513=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0513"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0513.pdf", plot=s6fig_513, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0514
+(s6fig_514=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0514"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 12), breaks=seq(0,12,2))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0514.pdf", plot=s6fig_514, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## WD0519
+(s6fig_519=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                gene=="WD0519"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 1.23), breaks=seq(0,1.5, 0.5))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig WD0519.pdf", plot=s6fig_519, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+
+## rpoD
+(s6fig_rpod=ggplot(dplyr::filter(results_qpcr_copies_octomom_genes,
+                                 gene=="rpoD"), aes(x=wolbachia, y=normalized_fold_change, color=wolbachia))+
+    geom_boxplot(outlier.shape=NA, size=0.5)+
+    geom_jitter(size=0.5, width=0.15)+
+    scale_color_manual(values=c("#000000", "#e69f00", "#b30098"))+
+    scale_y_continuous(limits=c(-0.05, 1.23), breaks=seq(0,1.5, 0.5))+
+    theme_figs()+ theme(legend.position="none"))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S6 Fig rpoD.pdf", plot=s6fig_rpod, device="pdf", dpi=300, units="in", width=150/96, height=150/96)
+}
+```
+
+# S7 Fig \| Selection of flies with desired Octomom copy number
+
+```{r s7_fig :: octomom_copy_number_dynamics :: dataset_and_plot}
+### S14 Data
+s14data = read.csv(
+  "Wolbachia_Example/original_data/S14 Data.csv",
+  na.strings = c("", "NA", "Undetermined"),
+  stringsAsFactors = TRUE
+)
+
+### wolbachia titres over fly generations
+results_qpcr_octomom_copy_dynamics = s14data %>%
+  dplyr::group_by(generation) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "CSB",
+      reference_gene = "WSP",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+### adding new variables
+results_qpcr_octomom_copy_dynamics = results_qpcr_octomom_copy_dynamics %>%
+  tidyr::separate(sample, c("wolbachia", NA), sep = "_", remove = FALSE)
+
+## converting variable to factor
+results_qpcr_octomom_copy_dynamics$wolbachia = factor(
+  results_qpcr_octomom_copy_dynamics$wolbachia,
+  levels = c("CSB", "NoWolb", "OCTO", "POP2L", "POP2H", "POPL", "POPH")
+)
+
+## filtering out Wolbachia-free samples
+copy_dynamics_figure = droplevels(
+  subset(
+    results_qpcr_octomom_copy_dynamics,
+    results_qpcr_octomom_copy_dynamics$wolbachia != "NoWolb"
+  )
+)
+
+## replacing 'NaN' in wMelOctoless to '0'
+# fold change
+copy_dynamics_figure$fold_change[copy_dynamics_figure$wolbachia == "OCTO" &
+                                   is.nan(copy_dynamics_figure$fold_change)] = 0
+# normalized fold change
+copy_dynamics_figure$normalized_fold_change[copy_dynamics_figure$wolbachia ==
+                                              "OCTO" & is.nan(copy_dynamics_figure$normalized_fold_change)] = 0
+
+### the plot
+(
+  s7fig = ggplot(
+    copy_dynamics_figure,
+    aes(
+      y = normalized_fold_change,
+      x = factor(generation),
+      color = wolbachia
+    )
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(wolbachia ~ .) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    theme(
+      legend.position = "none",
+      panel.grid.major.x = element_line(
+        size = 0.5,
+        linetype = "dashed",
+        color = grey(0.7)
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S7 Fig.pdf",
+    plot = s7fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 350 / 96
+  )
+}
+```
+
+# Fig 3 \| Wolbachia Proliferation in adults
+
+## Fig 3 \| Dataset
+
+```{r fig_3 :: wolbachia_proliferation_dynamics :: dataset_and_plot}
+### S15 Data
+s15data = read.csv("Wolbachia_Example/original_data/S15 Data.csv",
+                   stringsAsFactors = TRUE)
+
+### wolbachia proliferation dynamics
+results_qpcr_wolb_proliferation = s15data %>%
+  dplyr::group_by(experimental_replicate, temperature, plate) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "CSB-REF",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  ) %>%
+  ungroup()
+
+## adding new variables
+results_qpcr_wolb_proliferation = results_qpcr_wolb_proliferation %>%
+  tidyr::separate(sample, c("wolbachia", "time_point", "replicate"), "_", remove =
+                    FALSE) %>%
+  filter(wolbachia != "CSB-REF")
+
+# converting variables to factors or continuous variables
+results_qpcr_wolb_proliferation$wolbachia = factor(
+  results_qpcr_wolb_proliferation$wolbachia,
+  levels = c("CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH")
+)
+#
+results_qpcr_wolb_proliferation$time_point = as.numeric(as.factor(results_qpcr_wolb_proliferation$time_point))
+
+#get new day column applying a transforming factor to time_point
+results_qpcr_wolb_proliferation <-
+  results_qpcr_wolb_proliferation %>%
+  mutate(day = as.character(temperature)) %>%
+  mutate(day = dplyr::recode(
+    day,
+    "18" = "10",
+    "25" = "7",
+    "29" = "3"
+  ))  %>%
+  mutate(day = as.numeric(day)) %>%
+  mutate(day = ((time_point - 1) * day))
+
+
+### plot
+ggplot(results_qpcr_wolb_proliferation, aes(x = time_point, y = log10(normalized_fold_change))) +
+  geom_boxplot(outlier.shape = NA, aes(group = time_point)) +
+  geom_jitter(width = 0.15, size = 0.5) +
+  facet_grid(temperature ~ wolbachia + experimental_replicate, scales =
+               "free")
+```
+
+## Fig 3 \| Statistical analysis
+
+## full model. doubling times
+
+```{r fig_3 :: wolbachia_proliferation_dynamics :: analysis and doubling time}
+### analysis
+# converting temperature to factor
+results_qpcr_wolb_proliferation$temperature <-
+  as.factor(results_qpcr_wolb_proliferation$temperature)
+
+## full model
+model_proliferation_all_temps = lmer(
+  log(normalized_fold_change) ~ day * wolbachia * temperature + (1 |
+                                                                   experimental_replicate),
+  data = results_qpcr_wolb_proliferation
+)
+
+# significance of the model
+car::Anova(model_proliferation_all_temps)
+
+# summary
+summary(model_proliferation_all_temps, corr = FALSE)
+
+## comparing temperature per Wolbachia
+multcomp_all_temps = emmeans::lstrends(
+  model_proliferation_all_temps,
+  consec ~ temperature | wolbachia,
+  var = "day",
+  adj = "none"
+)
+
+
+## estimating doubling times +/- se and 95% confidence interval
+(
+  doubling_time_all <- as.data.frame(multcomp_all_temps$lstrends) %>%
+    mutate(doubling_time = log(2) / day.trend) %>%
+    mutate(doubling_lower.CL = log(2) / (upper.CL)) %>%
+    mutate(doubling_upper.CL = log(2) / (lower.CL)) %>%
+    mutate(lower = log(2) / (day.trend + SE)) %>%
+    mutate(upper = log(2) / (day.trend - SE))
+)
+
+doubling_time_all$wolbachia = factor(
+  doubling_time_all$wolbachia,
+  levels = c("CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH"),
+  labels = c(
+    "wMelCS_b",
+    "wMelOctoless",
+    "wMelPop2-Low",
+    "wMelPop2-High",
+    "wMelPop-Low",
+    "wMelPop-High"
+  )
+)
+
+
+if (save_files == TRUE)
+{
+  write.csv(doubling_time_all,
+            "../results/Wolbachia_Doubling_Time_Adults.csv")
+}
+```
+
+## direct comparison of octoless and csb
+
+```{r octoless vs csb}
+### Analysis of wMelCS_b and wMelOctoless only
+# the model with interaction between Wolbachia and temperature
+model_prol_octo_csb = lmer(
+  log(normalized_fold_change) ~ day * wolbachia * temperature + (1 |
+                                                                   experimental_replicate),
+  data = filter(
+    results_qpcr_wolb_proliferation,
+    wolbachia == "CSB" | wolbachia == "OCTO"
+  )
+)
+
+# significance
+car::Anova(model_prol_octo_csb)
+
+# A simpler model removing triple interaction and wolbachia*temperature interaction shown not to be significant in the Anova comparisons
+model_prol_octo_csb_simpler = lmer(
+  log(normalized_fold_change) ~ day * temperature + day * wolbachia + (1 |
+                                                                         experimental_replicate),
+  data = filter(
+    results_qpcr_wolb_proliferation,
+    wolbachia == "CSB" | wolbachia == "OCTO"
+  )
+)
+
+# significance
+car::Anova(model_prol_octo_csb_simpler)
+
+# summary
+summary(model_prol_octo_csb_simpler, corr = FALSE)
+
+# see estimates of growth for both Wolbachia and different temperatures
+(
+  multcomp_octo_cs_all_temps = emmeans::lstrends(
+    model_prol_octo_csb_simpler,
+    ~ temperature | wolbachia,
+    var = "day",
+    adj = "holm"
+  )
+)
+
+
+# contrasts of Wolbachia growth at different temperatures - equal for both since there is no triple interaction
+(
+  multcomp_octo_cs_between_temps = emmeans::lstrends(
+    model_prol_octo_csb_simpler,
+    consec ~ temperature,
+    var = "day",
+    adj = "holm"
+  )
+)
+```
+
+## comparison of new variants to cs_b
+
+```{r new variants}
+### analysis
+# converting temperature to factor
+results_qpcr_wolb_prol_csb <-
+  filter(results_qpcr_wolb_proliferation,
+         wolbachia != "POPH" & wolbachia != "POPL")
+
+## full model of csb and new variants
+model_proliferation_csb_temps = lmer(
+  log(normalized_fold_change) ~ day * wolbachia * temperature + (1 |
+                                                                   experimental_replicate),
+  data = results_qpcr_wolb_prol_csb
+)
+
+# significance of the model
+car::Anova(model_proliferation_csb_temps)
+
+# summary
+summary(model_proliferation_csb_temps, corr = FALSE)
+
+### multiple comparison
+## comparing temperature per Wolbachia
+(
+  multcomp_csb_temps = emmeans::lstrends(
+    model_proliferation_csb_temps,
+    consec ~ temperature | wolbachia,
+    var = "day",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multcomp_csb_temps$lstrends, adj = "holm")
+
+
+## comparing Wolbachia per temperature
+(
+  multcomp_csb_wolb = emmeans::lstrends(
+    model_proliferation_csb_temps,
+    pairwise ~ wolbachia | temperature,
+    var = "day",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multcomp_csb_wolb$lstrends, adj = "holm")
+
+
+```
+
+## copy number influence on wMelPop and wMelPop2
+
+```{r copy number growth}
+### Octomom copy number influence in wMelPop and wMelPOP2
+# filter data and make new columns with genotype and octomom copy number
+results_qpcr_pops_proliferation <-
+  results_qpcr_wolb_proliferation %>%
+  filter(wolbachia != "CSB" & wolbachia != "OCTO") %>%
+  mutate(genotype = wolbachia) %>%
+  mutate(
+    genotype = dplyr::recode(
+      genotype,
+      "POP2L" = "CSB",
+      "POP2H" = "CSB",
+      "POPL" = "POP",
+      "POPH" = "POP"
+    )
+  )  %>%
+  mutate(copy_number = wolbachia) %>%
+  mutate(
+    copy_number = dplyr::recode(
+      copy_number,
+      "POP2L" = "low",
+      "POP2H" = "high",
+      "POPL" = "low",
+      "POPH" = "high"
+    )
+  ) %>%
+  droplevels()
+
+
+### linear model to test effect of genotype and copy number
+## full model
+model_prol_pop = lmer(
+  log(normalized_fold_change) ~ day * genotype * copy_number * temperature +
+    (1 | experimental_replicate),
+  data = results_qpcr_pops_proliferation
+)
+
+# significance
+car::Anova(model_prol_pop)
+
+## simpler model
+# simplified model without interactions that are not significant
+model_prol_pop_simpler = lmer(
+  log(normalized_fold_change) ~ day * genotype * temperature + day * copy_number *
+    temperature + (1 |
+                     experimental_replicate),
+  data = results_qpcr_pops_proliferation
+)
+
+# significance of the model
+car::Anova(model_prol_pop_simpler)
+
+# summary
+summary(model_prol_pop_simpler)
+
+## multiple comparison
+# compare Wolbachia with different Octomom copy number at the different temperatures
+(
+  multcomp_pop_all_temps = emmeans::lstrends(
+    model_prol_pop_simpler,
+    pairwise ~ copy_number | temperature,
+    var = "day",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multcomp_pop_all_temps$lstrends, adj = "holm")
+
+
+# compare differences between temperatures for each Octomom copy number
+(
+  multcomp_pop_temps_each = emmeans::lstrends(
+    model_prol_pop_simpler,
+    consec ~ temperature | copy_number,
+    var = "day",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multcomp_pop_temps_each$lstrends, adj = "holm")
+
+
+# influence of genotype
+(
+  multcomp_pop_all_genotype = emmeans::lstrends(
+    model_prol_pop_simpler,
+    pairwise ~ genotype | temperature,
+    var = "day",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multcomp_pop_all_genotype$lstrends, adj = "holm")
+
+```
+
+## Fig 3A-C
+
+```{r fig_3 :: wolbachia_proliferation_dynamics :: final_figure}
+### plots
+## 18ºC
+(
+  fig3a = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation,
+      temperature == "18",
+      experimental_replicate == "1"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.02, 2.5e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 6, 1),
+      labels = c("0", "10", "20", "30", "40", "50")
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 3A.pdf",
+    plot = fig3a,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 190 / 96
+  )
+}
+
+
+## 25ºC
+(
+  fig3b = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation,
+      temperature == "25",
+      experimental_replicate == "1"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.02, 2.5e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 5, 1),
+      labels = c("0", "7", "14", "21", "28")
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 3B.pdf",
+    plot = fig3b,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 190 / 96
+  )
+}
+
+
+## 29ºC
+(
+  fig3c = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation,
+      temperature == "29",
+      experimental_replicate == "1"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.02, 2.5e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 6, 1),
+      labels = c("0", "3", "6", "9", "12", "15")
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 3C.pdf",
+    plot = fig3c,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 190 / 96
+  )
+}
+```
+
+## S10A-C Fig
+
+```{r s10_fig :: wolbachia_proliferation_dynamics :: final_figure}
+## S10A Fig
+(
+  s9afig = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation,
+      temperature == "18",
+      experimental_replicate == "2"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.02, 2.5e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 6, 1),
+      labels = c("0", "10", "20", "30", "40", "50")
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S10A Fig.pdf",
+    plot = s10afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 190 / 96
+  )
+}
+
+
+## S10B Fig
+(
+  s10bfig = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation,
+      temperature == "25",
+      experimental_replicate == "2"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.02, 2.5e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 5, 1),
+      labels = c("0", "7", "14", "21", "28")
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S10B Fig.pdf",
+    plot = s10bfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 190 / 96
+  )
+}
+
+
+## S10C Fig
+(
+  s10cfig = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation,
+      temperature == "29",
+      experimental_replicate == "2"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.02, 2.5e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 6, 1),
+      labels = c("0", "3", "6", "9", "12", "15")
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    )
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S10C Fig.pdf",
+    plot = s10cfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 700 / 96,
+    height = 190 / 96
+  )
+}
+```
+
+## S11 Fig \| Wolbachia titers day of eclosion
+
+```{r s11_fig :: wolbachia_titer_day_of_eclosion :: analysis}
+### the model
+## model by Wolbachia titers
+model_wolb_titer_day0 = lmer(
+  log(normalized_fold_change) ~ wolbachia + (1 |
+                                               experimental_replicate),
+  data = dplyr::filter(results_qpcr_wolb_proliferation, time_point == "1")
+)
+
+# significance of the model
+car::Anova(model_wolb_titer_day0)
+
+# summary
+summary(model_wolb_titer_day0, corr = FALSE)
+
+# multiple comparison
+(multiple_wolb_titer_day0 = emmeans::emmeans(model_wolb_titer_day0, list(pairwise ~
+                                                                           wolbachia), adj = "holm"))
+#
+multcomp::cld(multiple_wolb_titer_day0$`emmeans of wolbachia`, adj = "holm")
+
+## extract coefficients from full model
+(
+  time_0_levels <- as.data.frame(multiple_wolb_titer_day0$emmeans) %>%
+    mutate(mean = exp(emmean)) %>%
+    mutate(lower_db = exp(lower.CL)) %>%
+    mutate(upper_db = exp(upper.CL)) %>%
+    mutate(wolbachia2 = wolbachia) %>%
+    mutate(
+      wolbachia = dplyr::recode(
+        wolbachia,
+        "CSB" = "wMelCS_b",
+        "POP2L" = "wMelPop2-Low",
+        "POP2H" = "wMelPop2-High",
+        "POPL" = "wMelPop-Low",
+        "POPH" = "wMelPop-High",
+        "OCTO" = "wMelOctoless"
+      )
+    )
+)
+```
+
+```{r s11_fig :: wolbachia_titer_day_eclosion :: final_figure}
+### plot
+(
+  s11fig = ggplot(
+    dplyr::filter(results_qpcr_wolb_proliferation, time_point == "1"),
+    aes(
+      x = reorder(wolbachia, desc(wolbachia)),
+      y = normalized_fold_change,
+      color = wolbachia
+    )
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.08, 200),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2)
+    ) +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    coord_flip()
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(filename="../results/S11 Fig.pdf", plot=s11fig, device="pdf", dpi=300, units="in", width=300/96, height=200/96)
+}
+```
+
+# S12 Fig Phenotypes wMelPop2 and wMelPop controlled Octomom copy number
+
+## S12A \| Control Octomom copy number
+
+```{r s12_fig :: octomom_copy_csb_and_pop :: datasets_and_plot}
+### S16 Data
+s16data = read.csv("Wolbachia_Example/original_data/S16 Data.csv",
+                   stringsAsFactors = TRUE)
+
+### determining octomom copy number per experimental replicate
+results_qpcr_octomom_csb_and_pop = s16data %>%
+  dplyr::group_by(experimental_replicate) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "CSB",
+      reference_gene = "WSP",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+## adding new variables
+results_qpcr_octomom_csb_and_pop = results_qpcr_octomom_csb_and_pop %>%
+  tidyr::separate(sample, c("wolbachia", "replicate"), "_", remove = FALSE)
+
+# converting variable to factor
+results_qpcr_octomom_csb_and_pop$wolbachia = factor(results_qpcr_octomom_csb_and_pop$wolbachia,
+                                                    levels = c("CSB", "POP2", "POP"))
+
+### plot
+ggplot(
+  results_qpcr_octomom_csb_and_pop,
+  aes(x = wolbachia, y = normalized_fold_change, color = wolbachia)
+) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 0.5) +
+  facet_grid(. ~ experimental_replicate) +
+  theme_figs() + theme(legend.position = "none")
+```
+
+```{r s12_fig :: octomom_copy_csb_and_pop :: analysis_and_final_figure}
+### analysis
+## first replicate
+model_copy_number_csb_vs_pop_rep1 = lm(normalized_fold_change ~ wolbachia,
+                                       data = results_qpcr_octomom_csb_and_pop,
+                                       subset = experimental_replicate == "1")
+
+# significance of the model
+car::Anova(model_copy_number_csb_vs_pop_rep1)
+
+# sumamry
+summary(model_copy_number_csb_vs_pop_rep1)
+
+## multiple comparison
+(
+  multiple_copy_number_csb_vs_pop_rep1 = emmeans::emmeans(
+    model_copy_number_csb_vs_pop_rep1,
+    list(pairwise ~ wolbachia),
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multiple_copy_number_csb_vs_pop_rep1$`emmeans of wolbachia`,
+              adj = "holm")
+
+
+## second replicate
+model_copy_number_csb_vs_pop_rep2 = lm(fold_change ~ wolbachia,
+                                       data = results_qpcr_octomom_csb_and_pop,
+                                       subset = experimental_replicate == "2")
+
+# significance of the model
+car::Anova(model_copy_number_csb_vs_pop_rep2)
+
+# sumamry
+summary(model_copy_number_csb_vs_pop_rep2)
+
+## multiple comparison
+(
+  multiple_copy_number_csb_vs_pop_rep2 = emmeans::emmeans(
+    model_copy_number_csb_vs_pop_rep2,
+    list(pairwise ~ wolbachia),
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multiple_copy_number_csb_vs_pop_rep2$`emmeans of wolbachia`,
+              adj = "holm")
+
+
+### plots
+## replicate 1
+(
+  s12a1fig = ggplot(
+    dplyr::filter(
+      results_qpcr_octomom_csb_and_pop,
+      experimental_replicate == "1"
+    ),
+    aes(x = wolbachia, y = fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    theme_figs() + theme(legend.position = "none") +
+    scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f")) +
+    scale_y_continuous(limits = c(0, 4), breaks = seq(0, 4, 1))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S12A1 Fig.pdf",
+    plot = s12a1fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 160 / 96,
+    height = 140 / 96
+  )
+}
+
+
+## replicate 2
+(
+  s12a2fig = ggplot(
+    dplyr::filter(
+      results_qpcr_octomom_csb_and_pop,
+      experimental_replicate == "2"
+    ),
+    aes(x = wolbachia, y = fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    theme_figs() + theme(legend.position = "none") +
+    scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f")) +
+    scale_y_continuous(limits = c(0, 4), breaks = seq(0, 4, 1))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S12a2 Fig.pdf",
+    plot = s12a2fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 160 / 96,
+    height = 140 / 96
+  )
+}
+```
+
+## S12B \| Proliferation wMelPop2 and wMelPop
+
+```{r s12_fig :: wolb_proliferation_csb_and_pop :: dataset_and_plot}
+### S17 Data
+s17data = read.csv("Wolbachia_Example/original_data/S17 Data.csv",
+                   stringsAsFactors = TRUE)
+
+### wolbachia proliferation dynamics
+results_qpcr_wolb_proliferation_csb_and_pop = s17data %>%
+  dplyr::group_by(experimental_replicate, plate) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "CSB_A",
+      reference_gene = "RPL32",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+
+## adding new variables
+results_qpcr_wolb_proliferation_csb_and_pop = results_qpcr_wolb_proliferation_csb_and_pop %>%
+  tidyr::separate(sample, c("wolbachia", "time_point", "replicate"), "_", remove =
+                    FALSE) %>%
+  filter(wolbachia != "CSB-REF")
+
+# converting variables to factors or continuous variables
+results_qpcr_wolb_proliferation_csb_and_pop$wolbachia = factor(
+  results_qpcr_wolb_proliferation_csb_and_pop$wolbachia,
+  levels = c("CSB", "POP2", "POP")
+)
+#
+results_qpcr_wolb_proliferation_csb_and_pop$time_point = as.numeric(as.factor(results_qpcr_wolb_proliferation_csb_and_pop$time_point))
+
+
+### plot
+ggplot(results_qpcr_wolb_proliferation_csb_and_pop,
+       aes(x = time_point, y = log10(normalized_fold_change))) +
+  geom_boxplot(outlier.shape = NA, aes(group = time_point)) +
+  geom_jitter(width = 0.15, size = 0.5) +
+  facet_grid(experimental_replicate ~ wolbachia, scales = "free")
+```
+
+```{r s12_fig :: wolb_proliferation_csb_and_pop :: analysis_and_final_figure}
+### analysis
+model_exponential_wolb_proliferation_csb_and_pop = lmer(log(fold_change) ~
+                                                          time_point * wolbachia + (1 |
+                                                                                      experimental_replicate),
+                                                        data = results_qpcr_wolb_proliferation_csb_and_pop)
+
+# significance of the model
+car::Anova(model_exponential_wolb_proliferation_csb_and_pop)
+
+# summary
+summary(model_exponential_wolb_proliferation_csb_and_pop, corr = FALSE)
+
+
+## multiple comparison
+(
+  multiple_exponential_wolb_proliferation_csb_and_pop = emmeans::lstrends(
+    model_exponential_wolb_proliferation_csb_and_pop,
+    pairwise ~ wolbachia,
+    var = "time_point",
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multiple_exponential_wolb_proliferation_csb_and_pop$lstrends,
+              adj = "holm")
+
+
+### plots
+## replicate 1
+(
+  s12b1fig = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation_csb_and_pop,
+      experimental_replicate == "1"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.1, 1e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 5, 1),
+      labels = c("0", "7", "14", "21", "28")
+    ) +
+    scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f"))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S12B1 Fig.pdf",
+    plot = s12b1fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 300 / 96,
+    height = 180 / 96
+  )
+}
+
+
+## replicate 2
+(
+  s12b2fig = ggplot(
+    dplyr::filter(
+      results_qpcr_wolb_proliferation_csb_and_pop,
+      experimental_replicate == "2"
+    ),
+    aes(x = time_point, y = normalized_fold_change, color = wolbachia)
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(0.1, 1e3),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2, 1e3)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 5, 1),
+      labels = c("0", "7", "14", "21", "28")
+    ) +
+    scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f"))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S12B2 Fig.pdf",
+    plot = s12b2fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 300 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## S12C \| Lifespan wMelPop2 and wMelPop
+
+```{r s12_fig :: lifespan_csb_and_pop :: datasets_and_plot}
+### S18 Data
+s18data = read.csv("Wolbachia_Example/original_data/S18 Data.csv",
+                   stringsAsFactors = TRUE)
+
+### extracting Kaplan estimates (+/- confidence intervals) from the data
+results_lifespan_csb_and_pop = survfit(
+  Surv(day, status) ~ wolbachia + sex + experimental_replicate,
+  data = s18data,
+  type = "kaplan"
+)
+
+## converting survival model to a dataframe
+results_lifespan_csb_and_pop_dataset = as.data.frame(summary(results_lifespan_csb_and_pop, 
+                     times = c(0:160))[c("surv", "upper", "lower", "time", "strata")])
+
+## adding new variables to the dataframe
+results_lifespan_csb_and_pop_dataset = results_lifespan_csb_and_pop_dataset %>%
+  tidyr::separate(strata,
+                  c("wolbachia", "sex", "experimental_replicate"),
+                  ", ",
+                  remove = FALSE) %>%
+  dplyr::mutate(
+    wolbachia = str_replace(wolbachia, "wolbachia=", ""),
+    sex = str_replace(sex, "sex=", ""),
+    experimental_replicate = str_replace(experimental_replicate, "experimental_replicate=", "")
+  )
+
+## converting variables to factor
+results_lifespan_csb_and_pop_dataset$wolbachia = factor(
+  results_lifespan_csb_and_pop_dataset$wolbachia,
+  levels = c("wMelCS_b", "wMelPop2", "wMelPop")
+)
+
+### plot
+ggplot(data = results_lifespan_csb_and_pop_dataset, aes(
+  x = time,
+  y = surv,
+  linetype = sex,
+  color = wolbachia
+)) +
+  geom_line(size = 0.5) + geom_point(size = 0.5) +
+  facet_grid(. ~ experimental_replicate) + theme_figs() +
+  scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f")) +
+  scale_linetype_manual(values = c("dashed", "solid")) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 1.02),
+                     expand = c(0, 0),
+                     labels = percent)
+```
+
+```{r s12_fig :: lifespan_csb_and_pop :: analysis_and_final_figure}
+### analysis
+model_lifespan_csb_and_pop = coxme::coxme(Surv(day, status) ~ wolbachia + (1 |
+                                                                             sex) + (1 | unique_id), data = s18data)
+
+# significance of the model
+car::Anova(model_lifespan_csb_and_pop)
+
+# summary
+summary(model_lifespan_csb_and_pop, corr=FALSE)
+
+# multiple comparison
+(
+  multiple_lifespan_csb_and_pop = emmeans::emmeans(model_lifespan_csb_and_pop, pairwise ~ wolbachia, adj =
+                                                     "holm")
+)
+multcomp::cld(multiple_lifespan_csb_and_pop$emmeans, adj="holm")
+
+## extracting coefficients
+coeff_cox_model_lifespan_csb_and_pop = as.data.frame(multiple_lifespan_csb_and_pop$emmeans) %>%
+  group_by(wolbachia) %>%
+  summarize(Coeff = emmean, SE = SE) %>%
+  mutate(Coeff = Coeff - Coeff[wolbachia == "wMelCS_b"],
+         wolbachia = factor(wolbachia, levels = c("wMelCS_b", "wMelPop2", "wMelPop")))
+
+
+### plots
+## replicate 1
+(
+  s12c1fig = ggplot(
+    data = dplyr::filter(
+      results_lifespan_csb_and_pop_dataset,
+      experimental_replicate == "1"
+    ),
+    aes(
+      x = time,
+      y = surv,
+      linetype = sex,
+      color = wolbachia
+    )
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f")) +
+    scale_linetype_manual(values = c("dashed", "solid")) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 85),
+      breaks = c(0, 10, 20, 30, 40, 50, 60, 70, 80)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S12C1 Fig.pdf",
+    plot = s12c1fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 150 / 96
+  )
+}
+
+
+## replicate 2
+(
+  s12c2fig = ggplot(
+    data = dplyr::filter(
+      results_lifespan_csb_and_pop_dataset,
+      experimental_replicate == "2"
+    ),
+    aes(
+      x = time,
+      y = surv,
+      linetype = sex,
+      color = wolbachia
+    )
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(values = c("#000000", "#c94cb6", "#2f972f")) +
+    scale_linetype_manual(values = c("dashed", "solid")) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 85),
+      breaks = c(0, 10, 20, 30, 40, 50, 60, 70, 80)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S12C2 Fig.pdf",
+    plot = s12c2fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 150 / 96
+  )
+}
+```
+
+```{r s12_fig :: lifespan_csb_and_pop :: final_figure_coefficients}
+# coefficients
+(
+  s12dfig = ggplot(
+    coeff_cox_model_lifespan_csb_and_pop,
+    aes(x = wolbachia, y = Coeff, fill = wolbachia)
+  ) +
+    geom_col() + theme_figs() +
+    geom_errorbar(
+      aes(ymin = Coeff - SE, ymax = Coeff + SE),
+      width = 0.2,
+      size = 0.5
+    ) +
+    scale_fill_manual(values = c("#000000", "#c94cb6", "#2f972f")) +
+    theme(legend.position = "none") +
+    scale_y_continuous(limits = c(-0.5, 12), breaks = seq(0, 10, 2))
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S12D Fig.pdf",
+    plot = s12dfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 150 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+# Fig 4 \| Wolbachia proliferation in development
+
+## Fig 4 \| Standard curve analysis
+
+```{r fig_4 :: wolbachia_proliferation_development :: standard_curve analysis}
+### import dataset
+s19data = read.csv("Wolbachia_Example/original_data/S19 Data.csv",
+                   stringsAsFactors = TRUE)
+
+### estimate mean and SD per sample concentration and per plate
+standard_analysis = s19data %>%
+  dplyr::filter(grepl("STD", sample)) %>%
+  dplyr::group_by(plate, sample) %>%
+  dplyr::summarise(Cts = mean(cts, na.rm = TRUE),
+                   SD = sd(cts, na.rm = TRUE)) %>%
+  tidyr::separate(sample, c(NA, "dilution") , sep = "_", remove = FALSE) %>%
+  dplyr::mutate(
+    dilution = dplyr::recode(
+      dilution,
+      "1" = 7.56e7,
+      "2" = 7.56e6,
+      "3" = 7.56e5,
+      "4" = 7.56e4,
+      "5" = 7.56e3,
+      "6" = 7.56e2,
+      "7" = 7.56e1
+    )
+  )
+
+#remove highest dilution, it is out of the linear response
+standard_analysis <- filter(standard_analysis, dilution != 7.56e1)
+
+### run liner model on standards per plate
+table_models_standard_curve = standard_analysis %>%
+  dplyr::group_by(plate) %>%
+  do(model = lm(Cts ~ log10(dilution), data = .))
+
+# extracting parameters of the model
+(parameters_models_standard_curve = table_models_standard_curve %>%
+    do(
+      data.frame(
+        plate = .$plate,
+        intercept = coef(summary(.$model))[, 1][1],
+        intercept.se = coef(summary(.$model))[, 2][1],
+        slope = coef(summary(.$model))[, 1][2],
+        slope.se = coef(summary(.$model))[, 2][2]
+      )
+    ))
+
+
+### summarizing the Cts values per sample
+(
+  sumamry_wolb_absolute_titers = s19data %>%
+    dplyr::filter(gene == "WSP") %>%
+    dplyr::group_by(plate, sample) %>%
+    dplyr::summarise(
+      Cts = mean(cts, na.rm = TRUE),
+      SD = sd(cts, na.rm = TRUE)
+    )
+)
+
+
+### merge the cts values with models estimates
+table_results_absolute_wolbachia_titers = merge(sumamry_wolb_absolute_titers,
+                                                parameters_models_standard_curve,
+                                                by = "plate")
+
+### estimating absolute wolbachia titer
+table_results_absolute_wolbachia_titers = table_results_absolute_wolbachia_titers %>%
+  dplyr::filter(!(grepl("STD|Ref", sample))) %>%
+  tidyr::separate(
+    sample,
+    c("wolbachia", "time_point", "replicate"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  dplyr::mutate(titers = 10 ** ((Cts - intercept) / slope)) %>%
+  #filter(wolbachia!="STD", time_point!="Ref")%>%
+  dplyr::mutate(
+    pool = dplyr::recode(
+      time_point,
+      "A" = 10,
+      "B" = 10,
+      "C" = 10,
+      "D" = 10,
+      "E" = 10,
+      "F" = 1,
+      "G" = 1,
+      "HF" = 1,
+      "HM" = 1
+    ),
+    hours = dplyr::recode(
+      time_point,
+      "A" = 2,
+      "B" = 26,
+      "C" = 50,
+      "D" = 74,
+      "E" = 86,
+      "F" = 120,
+      "G" = 168,
+      "HF" = 240,
+      "HM" = 240
+    )
+  )
+
+
+### plot the standard curve per plate
+ggplot(standard_analysis, aes(x = log10(dilution), y = Cts)) +
+  geom_point() + theme_figs() + facet_wrap( ~ plate, ncol = 3) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    color = "red",
+    linetype = "dashed",
+    size = 0.5
+  )
+
+## add a new variable which correct titers per individual
+table_results_absolute_wolbachia_titers$titers2 <-
+  (
+    table_results_absolute_wolbachia_titers$titers / table_results_absolute_wolbachia_titers$pool
+  )
+
+### wolbachia genome copy dynamics
+(
+  wolbachia_genome_copies = table_results_absolute_wolbachia_titers %>%
+    dplyr::group_by(wolbachia, time_point) %>%
+    dplyr::summarise(
+      genome_copies = mean(titers2, na.rm = TRUE),
+      Se = sd(titers2, na.rm = TRUE) / sqrt(n())
+    )
+)
+```
+
+## Fig 4 \| Statistical analysis
+
+```{r fig_4 :: wolbachia_proliferation_development :: analysis_and_final_figure}
+## model wolbachia titers in embryos
+model_wolbachia_titer_embryos = lm(log(titers2) ~ wolbachia,
+                                   data = filter(table_results_absolute_wolbachia_titers, hours == 2))
+
+# significance of the model
+car::Anova(model_wolbachia_titer_embryos)
+
+# summary
+summary(model_wolbachia_titer_embryos)
+
+(
+  number_estimates_embryo <-
+    emmeans::emmeans(model_wolbachia_titer_embryos, ~ wolbachia, adj = "none")
+)
+
+(
+  estimates_embryo <- summary(number_estimates_embryo) %>%
+    as.data.frame() %>%
+    mutate(emmean = exp(emmean)) %>%
+    mutate(lower.CL = exp(lower.CL)) %>%
+    mutate(upper.CL = exp(upper.CL))
+)
+
+
+## wolbachia titers in adults (time_point distinguishes male from female)
+# full model
+model_wolbachia_titer_adults = lm(
+  log(titers2) ~ wolbachia * time_point,
+  data = filter(table_results_absolute_wolbachia_titers,
+                hours == 240)
+)
+
+# significance of the model
+car::Anova(model_wolbachia_titer_adults)
+
+# estimate genome copy numbers from full model
+
+(
+  multiple_wolbachia_adults_number = emmeans::emmeans(
+    model_wolbachia_titer_adults,
+    pairwise ~ wolbachia | time_point,
+    adj = "none"
+  )
+)
+
+(
+  estimates_adults <-
+    as.data.frame(multiple_wolbachia_adults_number$emmeans) %>%
+    mutate(emmean = exp(emmean)) %>%
+    mutate(lower.CL = exp(lower.CL)) %>%
+    mutate(upper.CL = exp(upper.CL))
+)
+
+
+# simpler model
+model_wolbachia_titer_adults_simpler = lm(
+  log(titers2) ~ wolbachia + time_point,
+  data = filter(table_results_absolute_wolbachia_titers,
+                hours == 240)
+)
+
+# significance of the model
+car::Anova(model_wolbachia_titer_adults_simpler)
+
+# summary
+summary(model_wolbachia_titer_adults_simpler)
+
+
+# multiple comparison between Wolbachia variants
+(
+  multiple_wolbachia_dev_adults = emmeans::emmeans(
+    model_wolbachia_titer_adults_simpler,
+    pairwise ~ wolbachia,
+    adj = "holm"
+  )
+)
+multcomp::cld(multiple_wolbachia_dev_adults$emmeans)
+
+
+
+## model growth from egg to white pre-pupae
+model_wolbachia_proliferation_development <-
+  lm(
+    log(titers2) ~ hours * wolbachia,
+    data = filter(table_results_absolute_wolbachia_titers, hours < 160)
+  )
+
+# significance of the model
+car::Anova(model_wolbachia_proliferation_development)
+
+(
+  multcomp_development_wolb_levels = emmeans::emmeans(
+    model_wolbachia_proliferation_development,
+    pairwise ~ wolbachia,
+    adj = "holm"
+  )
+)
+
+## estimating doubling time
+(
+  multcomp_development = emmeans::lstrends(
+    model_wolbachia_proliferation_development,
+    pairwise ~ wolbachia,
+    var = "hours",
+    adj = "none"
+  )
+)
+#
+(
+  doubling_time_dev <-
+    as.data.frame(multcomp_development$lstrends) %>%
+    mutate(doubling_time_hours = log(2) / hours.trend) %>%
+    mutate(doubling_time = (log(2) / hours.trend) / 24) %>%
+    mutate(doubling_lower.CL = (log(2) / (upper.CL)) / 24) %>%
+    mutate(doubling_upper.CL = (log(2) / (lower.CL)) / 24) %>%
+    mutate(lower_db = (log(2) / (hours.trend - SE)) / 24) %>%
+    mutate(upper_db = (log(2) / (hours.trend + SE)) / 24)
+)
+
+
+## simplify model to remove interaction
+model_wolbachia_proliferation_development_simpler <-
+  lm(
+    log(titers2) ~ hours + wolbachia,
+    data = filter(table_results_absolute_wolbachia_titers, hours < 160)
+  )
+
+# significance of the model
+car::Anova(model_wolbachia_proliferation_development_simpler)
+
+# summary
+summary(model_wolbachia_proliferation_development_simpler)
+
+
+## growth in pupae
+model_wolbachia_proliferation_pupae <-
+  lm(
+    log(titers2) ~ hours * wolbachia,
+    data = filter(table_results_absolute_wolbachia_titers, hours > 100)
+  )
+
+# significance of the model
+car::Anova(model_wolbachia_proliferation_pupae)
+
+```
+
+## Fig 4 \| final figure
+
+```{r fig_4 :: wolbachia_proliferation_development :: final_figure}
+### final figure
+# panels
+
+panels_development_discrete = data.frame(
+  xstart = c(0, 1.5, 5.5, 7.5),
+  xend = c(1.5, 5.5, 7.5, 8.5),
+  stage = c("eggs", "larvae", "pupae", "adults")
+)
+
+# figure
+(
+  fig4 = ggplot() +
+    geom_boxplot(
+      data = table_results_absolute_wolbachia_titers,
+      aes(x = factor(hours), titers / pool, color = wolbachia),
+      outlier.shape = NA
+    ) +
+    geom_jitter(
+      data = table_results_absolute_wolbachia_titers,
+      aes(x = factor(hours), titers / pool, color = wolbachia),
+      width = 0.25,
+      size = 0.5
+    ) +
+    facet_grid(. ~ wolbachia) +
+    geom_vline(
+      xintercept = c(1.5, 5.5, 7.5),
+      linetype = "dashed",
+      color = "gray60",
+      size = 0.2
+    ) +
+    scale_y_log10(
+      name = "",
+      limits = c(1e0, 1e7),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7)
+    ) +
+    scale_color_manual(values = c("#000000", "#e69f00", "#7d006a")) +
+    scale_fill_manual(values = c("#000000", "gray80", "gray60", "gray40")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 4.pdf",
+    plot = fig4,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 550 / 96,
+    height = 250 / 96
+  )
+}
+```
+
+# S13 Fig \| Dynamics Octomom copy number
+
+## S13A Fig \| Octomom copy number development
+
+```{r s13_fig :: wolbachia_copy number_development :: dataset}
+### determining relative wolbachia titers
+results_octomom_copy_development = droplevels(subset(s19data, s19data$gene !=
+                                                       "RPL32")) %>%
+  group_by(plate) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "CSB_Ref",
+      reference_gene = "WSP",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+## adding new variables
+results_octomom_copy_development = results_octomom_copy_development %>%
+  tidyr::separate(sample, c("wolbachia", "time_point", "replicate"), "_", remove =
+                    FALSE) %>%
+  filter(time_point != "Ref") %>%
+  mutate(
+    hours = dplyr::recode(
+      time_point,
+      "A" = 2,
+      "B" = 26,
+      "C" = 50,
+      "D" = 74,
+      "E" = 86,
+      "F" = 120,
+      "G" = 168,
+      "HF" = 240,
+      "HM" = 240
+    )
+  )
+
+#remove Octoless
+results_octomom_copy_development <-
+  filter(results_octomom_copy_development, wolbachia != "OCTO")
+
+
+### analysis
+model_octomom_copy_development = lm(normalized_fold_change ~ hours * wolbachia, data =
+                                      results_octomom_copy_development)
+
+## significance
+car::Anova(model_octomom_copy_development)
+
+## summary
+summary(model_octomom_copy_development)
+```
+
+```{r s13_fig :: wolbachia_proliferation_development :: octomom_copy_development_final_figure}
+### panels
+panels_development_discrete = data.frame(
+  xstart = c(0, 1.5, 5.5, 7.5),
+  xend = c(1.5, 5.5, 7.5, 8.5),
+  stage = c("eggs", "larvae", "pupae", "adults")
+)
+
+(
+  s13afig = ggplot() +
+    geom_boxplot(
+      data = results_octomom_copy_development,
+      aes(
+        x = factor(hours),
+        y = normalized_fold_change,
+        color = wolbachia
+      ),
+      outlier.shape = NA
+    ) +
+    geom_jitter(
+      data = results_octomom_copy_development,
+      aes(
+        x = factor(hours),
+        y = normalized_fold_change,
+        color = wolbachia
+      ),
+      width = 0.25,
+      size = 0.5
+    ) +
+    facet_grid(. ~ wolbachia) +
+    geom_vline(
+      xintercept = c(1.5, 5.5, 7.5),
+      linetype = "dashed",
+      color = "gray60",
+      size = 0.2
+    ) +
+    scale_y_continuous(limits = c(-0.01, 12), breaks = seq(0, 12, 3)) +
+    scale_color_manual(values = c("#000000", "#e69f00", "#7d006a")) +
+    scale_fill_manual(values = c("#000000", "gray80", "gray60", "gray40")) +
+    theme_figs() + theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S13A Fig.pdf",
+    plot = s13afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 550 / 96,
+    height = 170 / 96
+  )
+}
+```
+
+## S13B \| Octomom copy number dynamics in adults
+
+```{r s13_fig :: dynamics_octomom_copy_number :: dataset_and_plot}
+### S20 data
+
+s20data = read.csv("Wolbachia_Example/original_data/S20 Data.csv",
+                   stringsAsFactors = TRUE)
+
+### dynamics octomom copy number
+results_qpcr_octomom_dynamics = s20data %>%
+  dplyr::group_by(experimental_replicate, temperature, plate) %>%
+  do(
+    qpcr.pfaffl(
+      data = .,
+      calibrator_sample = "CSB-REF",
+      reference_gene = "WSP",
+      efficiency_ref = 2,
+      efficiency_target = 2
+    )
+  )
+
+
+## adding new variables
+results_qpcr_octomom_dynamics = results_qpcr_octomom_dynamics %>%
+  tidyr::separate(sample, c("wolbachia", "time_point", "replicate"), "_", remove =
+                    FALSE) %>%
+  filter(wolbachia != "CSB-REF")
+
+# converting variables to factors or continuous variables
+results_qpcr_octomom_dynamics$wolbachia = factor(
+  results_qpcr_octomom_dynamics$wolbachia,
+  levels = c("CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH")
+)
+#
+results_qpcr_octomom_dynamics$time_point = as.numeric(as.factor(results_qpcr_octomom_dynamics$time_point))
+
+
+
+### plot
+ggplot(results_qpcr_octomom_dynamics, aes(x = time_point, y = log10(normalized_fold_change))) +
+  geom_boxplot(outlier.shape = NA, aes(group = time_point)) +
+  geom_jitter(width = 0.15, size = 0.5) +
+  facet_grid(temperature ~ wolbachia + experimental_replicate, scales =
+               "free")
+```
+
+```{r s13_fig :: dynamics_octomom_copy_number :: analysis}
+### replacing wMelOctoless 'NaN'
+## fold change
+results_qpcr_octomom_dynamics$fold_change[results_qpcr_octomom_dynamics$wolbachia ==
+                                            "OCTO" & is.nan(results_qpcr_octomom_dynamics$fold_change)] = 0
+
+## normalized fold change
+results_qpcr_octomom_dynamics$normalized_fold_change[results_qpcr_octomom_dynamics$wolbachia ==
+                                                       "OCTO" &
+                                                       is.nan(results_qpcr_octomom_dynamics$normalized_fold_change)] = 0
+
+
+#get new day column applying a transforming factor to time_point
+results_qpcr_octomom_dynamics <- results_qpcr_octomom_dynamics %>%
+  mutate(day = as.character(temperature)) %>%
+  mutate(day = dplyr::recode(
+    day,
+    "18" = "10",
+    "25" = "7",
+    "29" = "3"
+  ))  %>%
+  mutate(day = as.numeric(day)) %>%
+  mutate(day = ((time_point - 1) * day))
+
+#make temperature a factor
+results_qpcr_octomom_dynamics <- results_qpcr_octomom_dynamics %>%
+  ungroup() %>%
+  mutate(temperature = as.factor(as.character(temperature)))
+
+### summary Octomom copy number dynamics
+simplified_results_qpcr_octomom_dynamics = results_qpcr_octomom_dynamics %>%
+  dplyr::group_by(temperature, wolbachia, time_point) %>%
+  dplyr::summarise(
+    Median = median(normalized_fold_change, na.rm = TRUE),
+    IntQRange = IQR(normalized_fold_change, na.rm = TRUE),
+    Mean = mean(normalized_fold_change, na.rm = TRUE),
+    SD = sd(normalized_fold_change, na.rm = TRUE)
+  )
+
+
+### models for statistical analysis
+## all together
+# removed Octoless and wMelCS_b
+model_octomom_dynamics_all = lmer(
+  normalized_fold_change ~ day * wolbachia * temperature + (1 |
+                                                              experimental_replicate),
+  data = filter(
+    results_qpcr_octomom_dynamics,
+    wolbachia != "OCTO" & wolbachia != "CSB"
+  )
+)
+
+# significance
+car::Anova(model_octomom_dynamics_all)
+
+## simpler model
+model_octomom_dynamics_all_simpler = lmer(
+  normalized_fold_change ~ day + wolbachia + temperature + (1 |
+                                                              experimental_replicate),
+  data = filter(
+    results_qpcr_octomom_dynamics,
+    wolbachia != "OCTO" & wolbachia != "CSB"
+  )
+)
+
+# significance of the model
+car::Anova(model_octomom_dynamics_all_simpler)
+
+# summary
+summary(model_octomom_dynamics_all_simpler, corr = FALSE)
+
+```
+
+```{r s13_fig :: dynamics_octomom_copy_number :: final_figure}
+### plots
+## 18ºC
+(
+  s13b1fig = ggplot(
+    dplyr::filter(
+      results_qpcr_octomom_dynamics,
+      temperature == "18",
+      wolbachia != "OCTO"
+    ),
+    aes(
+      x = time_point,
+      y = normalized_fold_change,
+      color = wolbachia,
+      shape = factor(experimental_replicate)
+    )
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(1e-1, 1.3e2),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 6, 1),
+      labels = c("0", "10", "20", "30", "40", "50")
+    ) +
+    scale_shape_manual(values = c(15, 16)) +
+    scale_color_manual(values = c(
+      "#000000", "#c94cb6", "#7d006a", "#2f972f", "#004000"
+    ))
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S13B1 Fig.pdf",
+    plot = s13b1fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 500 / 96,
+    height = 190 / 96
+  )
+}
+
+
+
+## 25ºC
+(
+  s13b2fig = ggplot(
+    dplyr::filter(
+      results_qpcr_octomom_dynamics,
+      temperature == "25",
+      wolbachia != "OCTO"
+    ),
+    aes(
+      x = time_point,
+      y = normalized_fold_change,
+      color = wolbachia,
+      shape = factor(experimental_replicate)
+    )
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(1e-1, 1.3e2),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 5, 1),
+      labels = c("0", "7", "14", "21", "28")
+    ) +
+    scale_shape_manual(values = c(15, 16)) +
+    scale_color_manual(values = c(
+      "#000000", "#c94cb6", "#7d006a", "#2f972f", "#004000"
+    ))
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S13B2 Fig.pdf",
+    plot = s13b2fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 500 / 96,
+    height = 190 / 96
+  )
+}
+
+
+## 29ºC
+(
+  s13b3fig = ggplot(
+    dplyr::filter(
+      results_qpcr_octomom_dynamics,
+      temperature == "29",
+      wolbachia != "OCTO"
+    ),
+    aes(
+      x = time_point,
+      y = normalized_fold_change,
+      color = wolbachia,
+      shape = factor(experimental_replicate)
+    )
+  ) +
+    geom_boxplot(aes(group = time_point), outlier.shape = NA) +
+    geom_jitter(width = 0.15, size = 0.5) +
+    facet_grid(. ~ wolbachia, scales = "free_x", space = "free_x") +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_y_log10(
+      name = "",
+      limits = c(1e-1 , 1.3e2),
+      labels = trans_format('log10', math_format(10 ^ .x)),
+      breaks = c(1e-1, 1e0, 1e1, 1e2)
+    ) +
+    scale_x_continuous(
+      name = "",
+      breaks = seq(1, 6, 1),
+      labels = c("0", "3", "6", "9", "12", "15")
+    ) +
+    scale_shape_manual(values = c(15, 16)) +
+    scale_color_manual(values = c(
+      "#000000", "#c94cb6", "#7d006a", "#2f972f", "#004000"
+    ))
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S13B3 Fig.pdf",
+    plot = s13b3fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 500 / 96,
+    height = 190 / 96
+  )
+}
+```
+
+# Fig 5 \| Wolbachia life-shortening phenotype
+
+## Fig 5 \| Dataset
+
+```{r fig_5 :: effect_wolb_host_lifespan :: datasets_and_plot}
+### S21 Data
+s21data = read.csv("Wolbachia/original_data/S21 Data.csv", stringsAsFactors = TRUE)
+
+### extracting Kaplan estimates (+/- confidence intervals) from the data
+results_lifespan_all_flies = survfit(
+  Surv(day, status) ~ wolbachia + temperature + sex + experimental_replicate,
+  data = s21data,
+  type = "kaplan"
+)
+
+## converting survival model to a dataframe
+results_lifespan_all_flies_dataset = as.data.frame(summary(results_lifespan_all_flies, times =
+                                                             c(0:160))[c("surv", "upper", "lower", "time", "strata")])
+
+## adding new variables to the dataframe
+results_lifespan_all_flies_dataset = results_lifespan_all_flies_dataset %>%
+  tidyr::separate(strata,
+                  c("wolbachia", "temperature", "sex", "experimental_replicate"),
+                  ", ",
+                  remove = FALSE) %>%
+  mutate(
+    wolbachia = str_replace(wolbachia, "wolbachia=", ""),
+    temperature = str_replace(temperature, "temperature=", ""),
+    sex = str_replace(sex, "sex=", ""),
+    experimental_replicate = str_replace(experimental_replicate, "experimental_replicate=", "")
+  )
+
+## converting variables to factor
+results_lifespan_all_flies_dataset$wolbachia = factor(
+  results_lifespan_all_flies_dataset$wolbachia,
+  levels = c(
+    "NoWolb",
+    "wMelCS_b",
+    "wMelOctoless",
+    "wMelPop2-Low",
+    "wMelPop2-High",
+    "wMelPop-Low",
+    "wMelPop-High"
+  )
+)
+
+### plot
+ggplot(data = results_lifespan_all_flies_dataset, aes(
+  x = time,
+  y = surv,
+  color = wolbachia,
+  linetype = sex
+)) +
+  geom_line(size = 0.5) + geom_point(size = 0.5) +
+  facet_grid(experimental_replicate ~ temperature, scales = "free") + theme_figs() +
+  scale_color_manual(values = c(
+    "#808080",
+    "#000000",
+    "#e69f00",
+    "#c94cb6",
+    "#7d006a",
+    "#2f972f",
+    "#004000"
+  )) +
+  scale_linetype_manual(values = c("dashed", "solid")) +
+  ylab("Survival") + xlab("Days post eclosion") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 1.02),
+                     expand = c(0, 0),
+                     labels = percent)
+```
+
+## Fig 5 \| Statistical analysis
+
+```{r fig_5 :: effect_wolb_host_lifespan :: analysis}
+### make temperature a discreet factor
+wolbachia_lifespan <- s21data %>%
+  mutate(temperature = as.factor(as.character(temperature)))
+
+### the model
+model_eff_wolb_lifespan_male = coxme::coxme(
+  Surv(day, status) ~ wolbachia * temperature + (1 |
+                                                   unique_id) + (1 |
+                                                                   experimental_replicate),
+  data = dplyr::filter(wolbachia_lifespan, sex == "Male")
+)
+
+# significance of the model
+car::Anova(model_eff_wolb_lifespan_male)
+
+# summary
+summary(model_eff_wolb_lifespan_male)
+
+## multiple comparison
+(
+  multcomp_survival_males <-
+    emmeans::emmeans(
+      model_eff_wolb_lifespan_male,
+      pairwise ~ wolbachia | temperature,
+      adj = "holm"
+    )
+)
+#
+multcomp::cld(multcomp_survival_males$emmeans, adj = "holm")
+
+#compare temperatures by Wolbachia
+(
+  multcomp_survival_males_by_wolb <-
+    emmeans::emmeans(
+      model_eff_wolb_lifespan_male,
+      consec ~ temperature | wolbachia,
+      adj = "holm"
+    )
+)
+
+#compare contrasts betwween Wolbachia variants and wMelCS line
+contrast(
+  multcomp_survival_males_by_wolb$contrasts,
+  method = "trt.vs.ctrl",
+  ref = 2,
+  by = "contrast"
+)
+
+
+
+## Females
+model_eff_wolb_lifespan_female = coxme::coxme(
+  Surv(day, status) ~ wolbachia + (1 |
+                                     unique_id),
+  data = dplyr::filter(wolbachia_lifespan, sex == "Female")
+)
+
+# significance of the model
+car::Anova(model_eff_wolb_lifespan_female)
+
+# summary
+summary(model_eff_wolb_lifespan_female)
+
+## multiple comparison
+(
+  multiple_comparison_lifespan_female = emmeans::emmeans(
+    model_eff_wolb_lifespan_female,
+    list(pairwise ~ wolbachia),
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multiple_comparison_lifespan_female$emmeans, adj = "holm")
+
+
+
+### extracting coefficients from the models
+## for males
+coeff_cox_model_lifespan_males = as.data.frame(multcomp_survival_males$emmeans) %>%
+  group_by(temperature, wolbachia) %>%
+  summarise(emmean = emmean, SE = SE) %>%
+  mutate(normalized_emmean = emmean - emmean[wolbachia == "NoWolb"],
+         wolbachia = factor(
+           wolbachia,
+           levels = c(
+             "NoWolb",
+             "wMelCS_b",
+             "wMelOctoless",
+             "wMelPop2-Low",
+             "wMelPop2-High",
+             "wMelPop-Low",
+             "wMelPop-High"
+           )
+         ))
+
+
+## for females
+coeff_cox_model_lifespan_females = as.data.frame(multiple_comparison_lifespan_female$emmeans) %>%
+  group_by(wolbachia) %>%
+  summarise(emmean = emmean, SE = SE) %>%
+  mutate(normalized_emmean = emmean - emmean[wolbachia == "NoWolb"],
+         wolbachia = factor(
+           wolbachia,
+           levels = c(
+             "NoWolb",
+             "wMelCS_b",
+             "wMelOctoless",
+             "wMelPop2-Low",
+             "wMelPop2-High",
+             "wMelPop-Low",
+             "wMelPop-High"
+           )
+         ))
+
+
+### plots
+# coefficients of males
+ggplot(
+  coeff_cox_model_lifespan_males,
+  aes(
+    x = reorder(wolbachia, desc(wolbachia)),
+    y = normalized_emmean,
+    fill = wolbachia
+  )
+) +
+  geom_col() + theme_figs() +
+  geom_errorbar(
+    aes(ymin = normalized_emmean - SE, ymax = normalized_emmean + SE),
+    width = 0.2,
+    size = 0.5
+  ) +
+  facet_grid(. ~ temperature) +
+  scale_fill_manual(values = c(
+    "#808080",
+    "#000000",
+    "#e69f00",
+    "#c94cb6",
+    "#7d006a",
+    "#2f972f",
+    "#004000"
+  )) +
+  coord_flip() + theme(legend.position = "none") +
+  scale_y_continuous(limits = c(NA, NA))
+
+# coefficients of females
+ggplot(
+  coeff_cox_model_lifespan_females,
+  aes(
+    x = reorder(wolbachia, desc(wolbachia)),
+    y = normalized_emmean,
+    fill = wolbachia
+  )
+) +
+  geom_col() + theme_figs() +
+  geom_errorbar(
+    aes(ymin = normalized_emmean - SE, ymax = normalized_emmean + SE),
+    width = 0.2,
+    size = 0.5
+  ) +
+  scale_fill_manual(values = c(
+    "#808080",
+    "#000000",
+    "#e69f00",
+    "#c94cb6",
+    "#7d006a",
+    "#2f972f",
+    "#004000"
+  )) +
+  coord_flip() + theme(legend.position = "none") +
+  scale_y_continuous(limits = c(NA, NA))
+```
+
+## Fig 5 and S14 Fig panels male lifespan
+
+```{r fig_5 :: effect_wolb_host_lifespan :: final_figures_males}
+### plots
+## Males
+# 18ºC
+(
+  fig5a = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      temperature == "18" &
+        experimental_replicate == "2"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 155),
+      breaks = c(0, 20, 40, 60, 80, 100, 120, 140, 160)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5A.pdf",
+    plot = fig5a,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+(
+  s14afig = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      temperature == "18" &
+        experimental_replicate == "1"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 155),
+      breaks = c(0, 20, 40, 60, 80, 100, 120, 140, 160)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S14A Fig.pdf",
+    plot = s14afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+# 25ºC
+(
+  fig5b = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      sex != "Female" &
+        temperature == "25" &
+        experimental_replicate == "1"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 85),
+      breaks = c(0, 10, 20, 30, 40, 50, 60, 70, 80)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5B.pdf",
+    plot = fig4b,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+(
+  s14bfig = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      sex != "Female" &
+        temperature == "25" &
+        experimental_replicate == "2"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 85),
+      breaks = c(0, 10, 20, 30, 40, 50, 60, 70, 80)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S14B Fig.pdf",
+    plot = s14bfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+# 29ºC
+(
+  fig5c = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      sex != "Female" &
+        temperature == "29" &
+        experimental_replicate == "1"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 45),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5C.pdf",
+    plot = fig5c,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+(
+  s14cfig = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      sex != "Female" &
+        temperature == "29" &
+        experimental_replicate == "2"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 45),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S14C Fig.pdf",
+    plot = s14cfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+## the coefficients
+(
+  fig5d = ggplot(
+    coeff_cox_model_lifespan_males,
+    aes(
+      x = reorder(wolbachia, desc(wolbachia)),
+      y = normalized_emmean,
+      fill = wolbachia
+    )
+  ) +
+    geom_col() + theme_figs() +
+    geom_errorbar(
+      aes(ymin = normalized_emmean - SE, ymax = normalized_emmean + SE),
+      width = 0.2,
+      size = 0.5
+    ) +
+    facet_grid(. ~ temperature) +
+    scale_fill_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    theme(legend.position = "none") + coord_flip() +
+    scale_y_continuous(limits = c(-1.5, 20), breaks = seq(0, 20, 5))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5D.pdf",
+    plot = fig5d,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 600 / 96,
+    height = 200 / 96
+  )
+}
+```
+
+## S14D-E Fig \| Wolbachia life-shortening phenotype :: Females
+
+```{r s14_fig :: effect_wolb_host_lifespan :: final_figures_females}
+### plots
+## replicate 1
+(
+  s14drep1fig = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      sex == "Female" &
+        experimental_replicate == "1"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 85),
+      breaks = c(0, 10, 20, 30, 40, 50, 60, 70, 80)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S14Drep1 Fig.pdf",
+    plot = s14drep1fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+
+## replicate 2
+(
+  s14drep2fig = ggplot(
+    data = filter(
+      results_lifespan_all_flies_dataset,
+      sex == "Female" &
+        experimental_replicate == "2"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 85),
+      breaks = c(0, 10, 20, 30, 40, 50, 60, 70, 80)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S14Drep2 Fig.pdf",
+    plot = s14drep2fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+# coefficients
+(
+  s14efig = ggplot(
+    coeff_cox_model_lifespan_females,
+    aes(
+      x = reorder(wolbachia, desc(wolbachia)),
+      y = normalized_emmean,
+      fill = wolbachia
+    )
+  ) +
+    geom_col() + theme_figs() +
+    geom_errorbar(
+      aes(ymin = normalized_emmean - SE, ymax = normalized_emmean + SE),
+      width = 0.2,
+      size = 0.5
+    ) +
+    scale_fill_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    theme(legend.position = "none") + coord_flip() +
+    scale_y_continuous(limits = c(-1.5, 20), breaks = seq(0, 20, 5))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S14E Fig.pdf",
+    plot = s14efig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 260 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## S15 Fig \| Bidirectional crosses
+
+```{r s15_fig :: wolbachia_bidirectional_crosses :: dataset_and_plot}
+### S22 Data
+s22data = read.csv("Wolbachia/original_data/S22 Data.csv", stringsAsFactors = TRUE)
+
+## extracting Kaplan estimates (+/- confidence intervals) from the data
+results_lifespan_bidirectional_crosses = survfit(Surv(day, status) ~ cross +
+                                                   experimental_replicate,
+                                                 data = s22data,
+                                                 type = "kaplan")
+
+# conferting the dataste to a data frame
+results_lifespan_bidirectional_dataset = as.data.frame(summary(results_lifespan_bidirectional_crosses, times =
+                                                                 c(0:160))[c("surv", "upper", "lower", "time", "strata")])
+
+# adding new variables to the dataset
+results_lifespan_bidirectional_dataset = results_lifespan_bidirectional_dataset %>%
+  tidyr::separate(strata,
+                  c("mating_direction", "experimental_replicate"),
+                  ", ",
+                  remove = FALSE) %>%
+  dplyr::mutate(
+    mating_direction = str_replace(mating_direction, "cross=", ""),
+    experimental_replicate = str_replace(experimental_replicate, "experimental_replicate=", "")
+  ) %>%
+  tidyr::separate(mating_direction, c("inherited_wolbachia", NA), " X ", remove =
+                    FALSE)
+
+# converting variables to factor
+results_lifespan_bidirectional_dataset$mating_direction = factor(
+  results_lifespan_bidirectional_dataset$mating_direction,
+  levels = c(
+    "CSB X OCTO",
+    "CSB X POP2L",
+    "CSB X POP2H",
+    "OCTO X CSB",
+    "POP2L X CSB",
+    "POP2H X CSB"
+  )
+)
+
+# make new variable for type of reciprocal cross
+results_lifespan_bidirectional_dataset$mating_cross <-
+  dplyr::recode(
+    as.character(results_lifespan_bidirectional_dataset$mating_direction),
+    "CSB X OCTO" = "OCTO",
+    "OCTO X CSB" = "OCTO",
+    "CSB X POP2L" = "POP2L",
+    "POP2L X CSB" = "POP2L",
+    "CSB X POP2H" = "POP2H",
+    "POP2H X CSB" = "POP2H"
+  )
+
+# relevel factor
+results_lifespan_bidirectional_dataset$mating_cross <-
+  factor(
+    results_lifespan_bidirectional_dataset$mating_cross,
+    levels = c("OCTO", "POP2L", "POP2H")
+  )
+
+
+### plot
+ggplot(data = results_lifespan_bidirectional_dataset, aes(x = time, y =
+                                                            surv, color = mating_direction)) +
+  geom_line(size = 1) + geom_point(size = 1) +
+  facet_grid(. ~ experimental_replicate) + theme_figs() +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c(
+    "#000000",
+    "#000000",
+    "#000000",
+    "#e69f00",
+    "#c94cb6",
+    "#7d006a"
+  ))
+```
+
+```{r s15_fig :: wolbachia_bidirectional_crosses :: analysis_and_final_figure}
+### analysis
+model_lifespan_bidirectional_cross = coxme::coxme(Surv(day, status) ~ cross + (1 |
+                                                                                 experimental_replicate) + (1 | unique_id) ,
+                                                  data = s22data)
+
+# significnce of the model
+car::Anova(model_lifespan_bidirectional_cross)
+
+# summary
+summary(model_lifespan_bidirectional_cross)
+
+
+## multiple comparison
+(
+  multiple_lifespan_bidirectional_cross = emmeans::emmeans(
+    model_lifespan_bidirectional_cross,
+    list(pairwise ~ cross),
+    adj = "holm"
+  )
+)
+#
+multcomp::cld(multiple_lifespan_bidirectional_cross$`emmeans of cross`,
+              adj = "holm")
+
+
+## extracting the coefficients
+coeff_cox_lifespan_bidirectional_cross = group_by(as.data.frame(multiple_lifespan_bidirectional_cross$`emmeans of cross`),
+                                                  cross) %>%
+  summarize(Coeff = emmean, SE = SE) %>%
+  mutate(Coeff = Coeff - Coeff[cross == "CSB X OCTO"])
+
+# ordering levels
+coeff_cox_lifespan_bidirectional_cross$cross = factor(
+  coeff_cox_lifespan_bidirectional_cross$cross,
+  levels = c(
+    "CSB X OCTO",
+    "CSB X POP2L",
+    "CSB X POP2H",
+    "OCTO X CSB",
+    "POP2L X CSB",
+    "POP2H X CSB"
+  )
+)
+
+### plots
+## S15A Fig
+(
+  s15afig = ggplot(
+    data = dplyr::filter(
+      results_lifespan_bidirectional_dataset,
+      experimental_replicate == "1"
+    ),
+    aes(x = time, y = surv, color = mating_direction)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#000000",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 45),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    facet_grid(. ~ mating_cross) +
+    theme_figs() +
+    theme(legend.position = "none")
+)
+
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S15A Fig.pdf",
+    plot = s15afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 420 / 96,
+    height = 150 / 96
+  )
+}
+
+
+
+## S15 B Fig
+(
+  s5bfig = ggplot(
+    data = dplyr::filter(
+      results_lifespan_bidirectional_dataset,
+      experimental_replicate == "2"
+    ),
+    aes(x = time, y = surv, color = mating_direction)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#000000",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a"
+      )
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 45),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    facet_grid(. ~ mating_cross) +
+    theme_figs() +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S15B Fig.pdf",
+    plot = s15bfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 420 / 96,
+    height = 150 / 96
+  )
+}
+
+## the coefficients
+(
+  s15cfig = ggplot(
+    coeff_cox_lifespan_bidirectional_cross,
+    aes(
+      x = reorder(cross, desc(cross)),
+      y = Coeff,
+      fill = cross
+    )
+  ) +
+    geom_col() + theme_figs() +
+    geom_errorbar(
+      aes(ymin = Coeff - SE, ymax = Coeff + SE),
+      width = 0.2,
+      size = 0.5
+    ) +
+    scale_fill_manual(
+      values = c(
+        "#000000",
+        "#000000",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a"
+      )
+    ) +
+    theme(legend.position = "none") + coord_flip() +
+    scale_y_continuous(limits = c(-1.5, 20), breaks = seq(0, 20, 5))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S15C Fig.pdf",
+    plot = s15cfig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 240 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## Fig 5E-G \| Correlation Wolbahcia life-shortening phenotype VS Wolbachia doubling time or titres at time 0
+
+```{r fig_5 :: correlation_lifespan_vs_proliferation :: dataset_and_analysis}
+# correlate CHR coefficients with doubling time
+# use doubling times calculate in {r fig_3 :: wolbachia_proliferation_dynamics :: analysis and doubling time} - doubling_time_all
+# use coefficients calculate in {
+# r fig_5::effect_wolb_host_lifespan::analysis
+# } - coeff_cox_model_lifespan_dataframe
+
+### adding new variables
+# wolbachia doubling time in adults
+doubling_time_all <- doubling_time_all %>%
+  unite("id",
+        "temperature",
+        "wolbachia",
+        sep = "_",
+        remove = FALSE)
+
+# Cox coefficients for Wolbachia life-shortening phenotype
+cox_lifespan_all <- coeff_cox_model_lifespan_males %>%
+  unite("id",
+        "temperature",
+        "wolbachia",
+        sep = "_",
+        remove = FALSE)
+
+# merging Wolbachia doubling time & Cox coefficients
+corr_chr_vs_proliferation = merge(doubling_time_all, cox_lifespan_all, by =
+                                    "id")
+
+
+### analysis
+(
+  results_correlation_chr_vs_proliferation = corr_chr_vs_proliferation %>%
+    dplyr::group_by(temperature.x) %>%
+    dplyr::summarise(
+      Estimate = cor.test(doubling_time, normalized_emmean)$estimate,
+      R2 = paste0(round((
+        cor.test(doubling_time, normalized_emmean)$estimate
+      ) ** 2, 2) * 100, "%"),
+      P.value = cor.test(doubling_time, normalized_emmean)$p.value
+    )
+)
+
+
+# correlate CHR coefficients with time 0 levels
+# use coefficients above
+# use time 0 titres from {r s11_fig :: wolbachia_titer_day_of_eclosion :: analysis} - time_0_levels
+
+time_0_levels <- time_0_levels %>%
+  mutate(Titers = emmean, SE.Titer = SE) %>%
+  mutate(Titers = Titers - Titers[wolbachia == "wMelCS_b"])
+
+# merging titers day of eclosion & Cox coefficients
+corr_chr_vs_day0 = merge(cox_lifespan_all, time_0_levels, by = "wolbachia")
+
+### analysis
+(
+  results_correlation_chr_vs_day0 = corr_chr_vs_day0 %>%
+    dplyr::group_by(temperature) %>%
+    dplyr::summarise(
+      Estimate = cor.test(Titers, normalized_emmean)$estimate,
+      R2 = paste0(round((
+        cor.test(Titers, normalized_emmean)$estimate
+      ) ** 2, 2) * 100, "%"),
+      P.value = cor.test(Titers, normalized_emmean)$p.value
+    )
+)
+```
+
+## Fig 5E-G panels
+
+```{r fig_5 :: correlation_lifespan_vs_proliferation :: final_figure}
+### plot
+
+# Fig 5E
+(
+  fig5e = ggplot(
+    dplyr::filter(corr_chr_vs_proliferation, temperature.x == "18"),
+    aes(x = doubling_time, y = normalized_emmean, color = wolbachia.x)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(xmax = upper, xmin = lower)) +
+    geom_errorbar(
+      aes(ymax = normalized_emmean + SE.y, ymin = normalized_emmean - SE.y)
+    ) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_y_continuous(limits = c(-0.5, 6), breaks = seq(0, 6, 1)) +
+    scale_x_continuous(limits = c(8, 22), breaks = seq(8, 22, 2))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5E.pdf",
+    plot = fig5e,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+
+
+# Fig 5F
+(
+  fig5f = ggplot(
+    dplyr::filter(corr_chr_vs_proliferation, temperature.x == "25"),
+    aes(x = doubling_time, y = normalized_emmean, color = wolbachia.x)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(xmax = upper, xmin = lower)) +
+    geom_errorbar(
+      aes(ymax = normalized_emmean + SE.y, ymin = normalized_emmean - SE.y)
+    ) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_y_continuous(limits = c(-1, 16), breaks = seq(0, 16, 2)) +
+    scale_x_continuous(limits = c(1, 18), breaks = seq(2, 18, 2))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5F.pdf",
+    plot = fig5f,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+
+
+# Fig 5G
+(
+  fig5g = ggplot(
+    dplyr::filter(corr_chr_vs_proliferation, temperature.x == "29"),
+    aes(x = doubling_time, y = normalized_emmean, color = wolbachia.x)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(xmax = upper, xmin = lower)) +
+    geom_errorbar(
+      aes(ymax = normalized_emmean + SE.y, ymin = normalized_emmean - SE.y)
+    ) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_y_continuous(limits = c(0, 16), breaks = seq(0, 16, 2)) +
+    scale_x_continuous(limits = c(0.75, 5), breaks = seq(1, 5, 1))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 5G.pdf",
+    plot = fig5g,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+```
+
+## S16 Fig panels \| Correlation Wolbachia life-shortening phenotype VS titers
+
+```{r s16_fig :: correlation_lifespan_vs_titers :: final_figure}
+### S16A Fig
+(
+  figs16a = ggplot(
+    dplyr::filter(corr_chr_vs_day0, temperature == "18"),
+    aes(x = Titers, y = normalized_emmean, color = wolbachia)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(
+      xmax = Titers + SE.Titer, xmin = Titers - SE.Titer
+    )) +
+    geom_errorbar(
+      aes(ymax = normalized_emmean + SE.x, ymin = normalized_emmean -
+            SE.x)
+    ) +
+    theme_figs() + theme(legend.position = "none") +
+    scale_color_manual(values = c(
+     "#000000",
+     "#e69f00",
+     "#c94cb6",
+     "#7d006a",
+     "#2f972f",
+     "#004000"
+   )) +
+   scale_y_continuous(limits = c(-0.5, 6), breaks = seq(0, 6, 1)) +
+   scale_x_continuous(limits = c(-0.25, 1.75), breaks = seq(0, 1.5, 0.5)))
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S16A Fig.pdf",
+    plot = figs16a,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+
+
+### S16B Fig
+(
+  figs16b = ggplot(
+    dplyr::filter(corr_chr_vs_day0, temperature == "25"),
+    aes(x = Titers, y = normalized_emmean, color = wolbachia)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(
+      xmax = Titers + SE.Titer, xmin = Titers - SE.Titer
+    )) +
+    geom_errorbar(
+      aes(ymax = normalized_emmean + SE.x, ymin = normalized_emmean - SE.x)
+    ) +
+    theme_figs() +  theme(legend.position = "none")+
+    scale_color_manual(values = c(
+      "#000000",
+      "#e69f00",
+      "#c94cb6",
+      "#7d006a",
+      "#2f972f",
+      "#004000"
+    )) +
+    scale_y_continuous(limits = c(-1, 16), breaks = seq(0, 16, 2)) +
+    scale_x_continuous(limits = c(-0.25, 1.75), breaks = seq(0, 1.5, 0.5)))
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S16B Fig.pdf",
+    plot = figs16b,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+
+### S16C Fig
+(
+  figs16c = ggplot(
+    dplyr::filter(corr_chr_vs_day0, temperature == "29"),
+    aes(x = Titers, y = normalized_emmean, color = wolbachia)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(
+      xmax = Titers + SE.Titer, xmin = Titers - SE.Titer
+    )) +
+    geom_errorbar(
+      aes(ymax = normalized_emmean + SE.x, ymin = normalized_emmean - SE.x)
+    ) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_y_continuous(limits = c(-1, 16), breaks = seq(0, 16, 2)) +
+    scale_x_continuous(limits = c(-0.25, 1.75), breaks = seq(0, 1.5, 0.5))
+)
+
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S16C Fig.pdf",
+    plot = figs16c,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+```
+
+# Fig 6 \| Wolbachia anti-viral protection
+
+## Fig 6 \| Dataset
+
+```{r fig_6 :: protection_against_dcv :: dataset_and_plot}
+### S23 Data
+s23data = read.csv("Wolbachia/original_data/S23 Data.csv", stringsAsFactors = TRUE)
+
+## choosing Wolbachia-free as reference
+s23data$wolbachia = factor(s23data$wolbachia,
+                           levels = c("NoWolb", "CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH"))
+
+### extracting Kaplan estimates (+/- confidence intervals) from the data
+results_survival_dcv = survfit(
+  Surv(day, status) ~ wolbachia + infection + experimental_replicate,
+  data = s23data,
+  type = "kaplan"
+)
+
+## converting survival model to a dataframe
+results_survival_dcv_dataset = as.data.frame(summary(results_survival_dcv, times =
+                                                       c(0:50))[c("surv", "upper", "lower", "time", "strata")])
+
+## adding new variables to the dataframe
+results_survival_dcv_dataset = results_survival_dcv_dataset %>%
+  tidyr::separate(strata,
+                  c("wolbachia", "infection", "experimental_replicate"),
+                  ", ",
+                  remove = FALSE) %>%
+  dplyr::mutate(
+    wolbachia = str_replace(wolbachia, "wolbachia=", ""),
+    infection = str_replace(infection, "infection=", ""),
+    infection = str_replace(infection, "   ", ""),
+    experimental_replicate = str_replace(experimental_replicate, "experimental_replicate=", "")
+  )
+
+
+
+## converting variables to factor
+results_survival_dcv_dataset$wolbachia = factor(
+  results_survival_dcv_dataset$wolbachia,
+  levels = c("NoWolb", "CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH"),
+  labels = c(
+    "NoWolb",
+    "wMelCS_b",
+    "wMelOctoless",
+    "wMelPop2-Low",
+    "wMelPop2-High",
+    "wMelPop-Low",
+    "wMelPop-High"
+  )
+)
+
+
+### plot
+ggplot(data = results_survival_dcv_dataset, aes(x = time, y = surv, color =
+                                                  wolbachia)) +
+  geom_line(size = 0.5) + geom_point(size = 0.5) +
+  facet_grid(experimental_replicate ~ infection, scales = "free") + theme_figs() +
+  scale_color_manual(values = c(
+    "#808080",
+    "#000000",
+    "#e69f00",
+    "#c94cb6",
+    "#7d006a",
+    "#2f972f",
+    "#004000"
+  )) +
+  scale_linetype_manual(values = c("dashed", "solid")) +
+  ylab("Survival") + xlab("Days post eclosion") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 1.02),
+                     expand = c(0, 0),
+                     labels = percent)
+```
+
+## Fig 6 \| Statistical analysis
+
+```{r fig_6 :: protection_against_dcv :: analysis}
+### analysis
+## dcv
+model_cox_survival_dcv = coxme::coxme(
+  Surv(day, status) ~ wolbachia + (1 |
+                                     unique_id) + (1 |
+                                                     replicate),
+  data = dplyr::filter(s23data, infection == "DCV")
+)
+
+# significance of the model
+car::Anova(model_cox_survival_dcv)
+
+# summary
+summary(model_cox_survival_dcv)
+
+
+# multiple comparison
+(multiple_cox_survival_dcv = emmeans::emmeans(model_cox_survival_dcv, list(pairwise ~
+                                                                             wolbachia), adj = "holm"))
+#
+multcomp::cld(multiple_cox_survival_dcv$`emmeans of wolbachia`)
+
+# extracting the coefficients
+coeff_cox_survival_dcv = as.data.frame(multiple_cox_survival_dcv$`emmeans of wolbachia`) %>%
+  group_by(wolbachia) %>%
+  summarise(DCV.Coef = emmean, DCV.Coef.SE = SE) %>%
+  mutate(
+    DCV.Coef = DCV.Coef - DCV.Coef[wolbachia == "NoWolb"],
+    wolbachia = factor(
+      wolbachia,
+      levels = c("NoWolb", "CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH"),
+      labels = c(
+        "NoWolb",
+        "wMelCS_b",
+        "wMelOctoless",
+        "wMelPop2-Low",
+        "wMelPop2-High",
+        "wMelPop-Low",
+        "wMelPop-High"
+      )
+    )
+  )
+
+
+
+
+## buffer
+model_cox_survival_buffer = coxme::coxme(
+  Surv(day, status) ~ wolbachia + (1 |
+                                     experimental_replicate) + (1 |
+                                                                  unique_id),
+  data = dplyr::filter(s23data, infection == "Buffer")
+)
+
+# significance of the model
+car::Anova(model_cox_survival_buffer)
+
+# summary
+summary(model_cox_survival_buffer)
+
+
+# multiple comparison
+(
+  multiple_cox_survival_buffer = emmeans::emmeans(model_cox_survival_buffer, list(pairwise ~
+                                                                                    wolbachia), adj = "holm")
+)
+#
+multcomp::cld(multiple_cox_survival_buffer$`emmeans of wolbachia`)
+
+# extracting the coefficients
+coeff_cox_survival_buffer = as.data.frame(multiple_cox_survival_buffer$`emmeans of wolbachia`) %>%
+  group_by(wolbachia) %>%
+  summarise(DCV.Coef = emmean, DCV.Coef.SE = SE) %>%
+  mutate(
+    DCV.Coef = DCV.Coef - DCV.Coef[wolbachia == "NoWolb"],
+    wolbachia = factor(
+      wolbachia,
+      levels = c("NoWolb", "CSB", "OCTO", "POP2L", "POP2H", "POPL", "POPH"),
+      labels = c(
+        "NoWolb",
+        "wMelCS_b",
+        "wMelOctoless",
+        "wMelPop2-Low",
+        "wMelPop2-High",
+        "wMelPop-Low",
+        "wMelPop-High"
+      )
+    )
+  )
+```
+
+## Fig 6A-D
+
+```{r fig_6 :: protection_against_dcv :: final_figure}
+### plots
+## fig6a
+(
+  fig6a = ggplot(
+    data = dplyr::filter(
+      results_survival_dcv_dataset,
+      experimental_replicate == "2" &
+        infection == "DCV"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_linetype_manual(values = c("dashed", "solid")) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 40),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 6A.pdf",
+    plot = fig6a,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+## fig6b
+(
+  fig6b = ggplot(
+    data = dplyr::filter(
+      results_survival_dcv_dataset,
+      experimental_replicate == "1" &
+        infection == "Buffer"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_linetype_manual(values = c("dashed", "solid")) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 40),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1.02),
+      expand = c(0, 0),
+      labels = percent
+    ) +
+    theme(legend.position = "none")
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 6B.pdf",
+    plot = fig6b,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+# figure 6c
+(
+  fig6c = ggplot(
+    coeff_cox_survival_dcv,
+    aes(
+      x = reorder(wolbachia, desc(wolbachia)),
+      y = DCV.Coef,
+      fill = wolbachia
+    )
+  ) +
+    geom_col() + theme_figs() +
+    geom_errorbar(
+      aes(ymin = DCV.Coef - DCV.Coef.SE, ymax = DCV.Coef + DCV.Coef.SE),
+      width = 0.2,
+      size = 0.5
+    ) +
+    scale_fill_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    theme(legend.position = "none") + coord_flip() +
+    scale_y_continuous(limits = c(-3.2, 2), breaks = seq(-3, 2, 1))
+)
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 6C.pdf",
+    plot = fig6c,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 260 / 96,
+    height = 200 / 96
+  )
+}
+
+
+# figure 6d
+(
+  fig6d = ggplot(
+    coeff_cox_survival_buffer,
+    aes(
+      x = reorder(wolbachia, desc(wolbachia)),
+      y = DCV.Coef,
+      fill = wolbachia
+    )
+  ) +
+    geom_col() + theme_figs() +
+    geom_errorbar(
+      aes(ymin = DCV.Coef - DCV.Coef.SE, ymax = DCV.Coef + DCV.Coef.SE),
+      width = 0.2,
+      size = 0.5
+    ) +
+    scale_fill_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    theme(legend.position = "none") + coord_flip() +
+    scale_y_continuous(limits = c(-3.2, 2), breaks = seq(-3, 2, 1))
+)
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 6D.pdf",
+    plot = fig6d,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 260 / 96,
+    height = 200 / 96
+  )
+}
+```
+
+## S16A-B Fig
+
+```{r s16_Fig :: protection_against_dcv :: final_figure}
+## figs16a
+(
+  s16afig = ggplot(
+    data = dplyr::filter(
+      results_survival_dcv_dataset,
+      experimental_replicate == "1" &
+        infection == "DCV"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c("#808080",
+                 "#000000",
+                 "#e69f00", 
+     "#c94cb6",
+     "#7d006a",
+     "#2f972f",
+     "#004000"
+   )) +
+   scale_linetype_manual(values = c("dashed", "solid")) +
+   scale_x_continuous(
+     expand = c(0, 0),
+     limits = c(0, 40),
+     breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+   ) +
+   scale_y_continuous(limits = c(0, 1.02),
+                      expand = c(0, 0),
+                      labels = percent) +
+   theme(legend.position = "none"))
+
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S16A Fig.pdf",
+    plot = s16afig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+
+
+## S16B Fig
+(
+  s16bfig = ggplot(
+    data = dplyr::filter(
+      results_survival_dcv_dataset,
+      experimental_replicate == "2" &
+        infection == "Buffer"
+    ),
+    aes(x = time, y = surv, color = wolbachia)
+  ) +
+    geom_line(size = 0.5) + geom_point(size = 0.5) + theme_figs() +
+    scale_color_manual(
+      values = c(
+        "#808080",
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_linetype_manual(values = c("dashed", "solid")) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(0, 40),
+      breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40)
+    ) +
+    scale_y_continuous(limits = c(0, 1.02),
+                       expand = c(0, 0),
+                       labels = percent) +
+    theme(legend.position = "none"))
+
+# saving the pdf
+if (save_files == TRUE)
+{
+  ggsave(
+    filename = "../results/S16B Fig.pdf",
+    plot = s16fig,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 230 / 96,
+    height = 180 / 96
+  )
+}
+```
+
+## Fig 6E \| Correlation protection, titres, and proliferation
+
+```{r fig_6 :: correlation_protection_vs_proliferation :: dataset_and_analysis}
+
+# correlate CHR coefficients of antiviral protection with doubling time
+# use doubling times calculate in {r fig_3 :: wolbachia_proliferation_dynamics :: analysis and doubling time} and altered in {r fig_5 :: correlation_lifespan_vs_proliferation :: dataset_and_analysis} - doubling_time_all
+# use coefficients calculate in {r fig_6 :: protection_against_dcv :: analysis} - coeff_cox_survival_dcv
+
+
+#merge the two datasets
+corr_protection_vs_proliferation <-
+  merge(coeff_cox_survival_dcv, doubling_time_all, by = "wolbachia") %>%
+  filter(temperature != "29")
+
+### analysis
+(
+  results_correlation_protection_vs_proliferation = corr_protection_vs_proliferation %>%
+    dplyr::group_by(temperature) %>%
+    dplyr::summarise(
+      Estimate = cor.test(doubling_time, DCV.Coef)$estimate,
+      R2 = paste0(round((
+        cor.test(doubling_time, DCV.Coef)$estimate
+      ) ** 2, 2) * 100, "%"),
+      P.value = cor.test(doubling_time, DCV.Coef)$p.value
+    )
+)
+
+
+# correlate CHR coefficients of antiviral protection with time 0 levels
+# use time 0 titres from {r s11_fig :: wolbachia_titer_day_of_eclosion :: analysis} and altered in {r fig_5 :: correlation_lifespan_vs_proliferation :: dataset_and_analysis}- time_0_levels
+
+### merging lifespan and proliferation datasets
+corr_protection_vs_titer_day0 = merge(coeff_cox_survival_dcv, time_0_levels, by =
+                                        "wolbachia")
+
+### analysis
+(
+  results_correlation_protection_vs_d0 = corr_protection_vs_titer_day0 %>%
+    dplyr::summarise(
+      Estimate = cor.test(DCV.Coef, emmean)$estimate,
+      R2 = paste0(round((
+        cor.test(DCV.Coef, emmean)$estimate
+      ) ** 2, 2) * 100, "%"),
+      P.value = cor.test(DCV.Coef, emmean)$p.value
+    )
+)
+```
+
+## Fig 6C correlation figure
+
+```{r figure_6e :: correlation_protection_vs_d0 :: final_figure}
+### plot
+(
+  fig6e = ggplot(
+    corr_protection_vs_titer_day0,
+    aes(x = emmean, y = DCV.Coef, color = wolbachia)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(xmax = emmean - SE, xmin = emmean + SE)) +
+    geom_errorbar(aes(
+      ymax = DCV.Coef - DCV.Coef.SE, ymin = DCV.Coef + DCV.Coef.SE
+    )) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_color_manual(values = c("#000000", 
+     "#e69f00",
+     "#c94cb6",
+     "#7d006a",
+     "#2f972f",
+     "#004000"
+   )) +
+   scale_y_continuous(limits = c(-2.5,-0.5),
+                      breaks = seq(-2.5, -0.5, 0.5)) +
+   scale_x_continuous(limits = c(-0.3, 1.75), breaks = seq(0, 1.5, 0.5)))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/Fig 6E.pdf",
+    plot = fig6e,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+```
+
+## S16D-E Fig
+
+```{r figure_s16 :: correlation_lifespan_vs_proliferation :: final_figure}
+### plot
+# S16D Fig
+(
+  figs16d = ggplot(
+    dplyr::filter(corr_protection_vs_proliferation, temperature == "18"),
+    aes(x = doubling_time, y = DCV.Coef, color = wolbachia)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(xmax = upper, xmin = lower)) +
+    geom_errorbar(
+      aes(ymax = DCV.Coef - DCV.Coef.SE, ymin = DCV.Coef+ DCV.Coef.SE)) +
+   theme_figs() +  theme(legend.position = "none") +
+   scale_color_manual(values = c(
+     "#000000",
+     "#e69f00",
+     "#c94cb6",
+     "#7d006a",
+     "#2f972f",
+     "#004000"
+   )) +
+   scale_y_continuous(limits = c(-2.5,-0.5),
+                      breaks = seq(-2.5, -0.5, 0.5)) +
+   scale_x_continuous(limits = c(8, 22), breaks = seq(8, 22, 2)))
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S16D Fig.pdf",
+    plot = figs16d,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+
+
+# S16E Fig
+(
+  figs16e = ggplot(
+    dplyr::filter(corr_protection_vs_proliferation, temperature == "25"),
+    aes(x = doubling_time, y = DCV.Coef, color = wolbachia)
+  ) +
+    geom_point(size = 2) +
+    geom_smooth(
+      method = "lm",
+      color = "#808080",
+      se = FALSE,
+      size = 0.5
+    ) +
+    geom_errorbarh(aes(xmax = upper, xmin = lower)) +
+    geom_errorbar(aes(
+      ymax = DCV.Coef - DCV.Coef.SE, ymin = DCV.Coef + DCV.Coef.SE
+    )) +
+    theme_figs() +  theme(legend.position = "none") +
+    scale_color_manual(
+      values = c(
+        "#000000",
+        "#e69f00",
+        "#c94cb6",
+        "#7d006a",
+        "#2f972f",
+        "#004000"
+      )
+    ) +
+    scale_y_continuous(
+      limits = c(-2.5,-0.5),
+      breaks = seq(-2.5, -0.5, 0.5)
+    ) +
+    scale_x_continuous(limits = c(1, 18), breaks = seq(2, 18, 2))
+)
+  
+
+# saving the pdf
+if(save_files==TRUE)
+{
+  ggsave(
+    filename = "../results/S16E Fig.pdf",
+    plot = figs16e,
+    device = "pdf",
+    dpi = 300,
+    units = "in",
+    width = 200 / 96,
+    height = 200 / 96
+  )
+}
+```
