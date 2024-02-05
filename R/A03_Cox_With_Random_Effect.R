@@ -1,40 +1,3 @@
-# Useful links ------------------------------------------------------------
-
-# https://www.drizopoulos.com/courses/emc/basic_surivival_analysis_in_r
-# https://stackoverflow.com/questions/32401706/r-proportional-hazard-assumption-in-coxme/67709136#67709136
-
-# Interpretação dos coeficientes do modelo de cox
-# https://medium.com/swlh/interpreting-cox-proportional-hazards-model-using-colon-dataset-in-r-fda1f9901292
-# https://www.sthda.com/english/wiki/cox-proportional-hazards-model
-# https://stats.stackexchange.com/questions/609091/how-to-interpret-cox-proportional-hazards-model-output-when-running-survival-ana
-
-
-# Artigo
-# https://socialsciences.mcmaster.ca/jfox/Books/Companion/appendices/Appendix-Cox-Regression.pdf
-
-
-# Diagnostico do modelo
-# https://shariq-mohammed.github.io/files/cbsa2019/1-intro-to-survival.html
-
-
-# outra forma de ajuste de modelo cox
-# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
-
-
-# comparação dos efeitos no modelo cox
-# https://stats.stackexchange.com/questions/607076/cox-ph-model-hr-is-it-possible-to-measure-against-the-general-average
-# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
-# https://stackoverflow.com/questions/67915896/pairwise-differences-between-survreg-survival-curves-survival-package-using-em
-
-
-# Teste para o efeito aleatório no modelo de cox
-# https://rpubs.com/kaz_yos/coxme1
-
-
-# plotar curvas
-# https://stackoverflow.com/questions/77654561/plotting-adjusted-survival-curve-for-a-mixed-effects-cox-regression-and-or-time
-
-
 # Packages ----------------------------------------------------------------
 
 
@@ -47,6 +10,7 @@ library(multcomp)
 library(riskRegression)
 library(adjustedCurves)
 library(pammtools)
+library(ggfortify)
 
 
 
@@ -113,8 +77,12 @@ data_surv_broca |>
 
 
 coxph_surv_rf <-
-  coxph(Surv(Time, Status) ~ Area_Type + Insect + frailty(Collection_Int),
-        data = df)
+  coxph(
+    Surv(Time, Status) ~ Area_Type + Insect + frailty(Collection_Int),
+    data = df,
+    x = TRUE,
+    model = TRUE
+  )
 
 
 coxph_surv_rf
@@ -123,24 +91,43 @@ coxph_surv_rf
 summary(coxph_surv_rf)
 
 
-coxph_surv_rf2 <-
-  coxme(Surv(Time, Status) ~ Area_Type + Insect + (1|Collection_Int),
-        data = df)
+(collection_ranef <-
+    coxph_surv_rf$coefficients[4:6][df$Collection_Int])
 
 
-test.ph <- cox.zph(coxph_surv_rf2)
+
+coxph_surv_rf_of <-
+  coxph(
+    Surv(Time, Status) ~ Area_Type + Insect + offset(collection_ranef),
+    data = df,
+    x = TRUE,
+    model = TRUE
+  )
 
 
-test.ph
+(test.ph <- cox.zph(coxph_surv_rf_of))
 
 
 ggcoxzph(test.ph)
+
+
+coxph_surv_rf2 <-
+  coxme(Surv(Time, Status) ~ Area_Type + Insect + (1 |
+                                                     Collection_Int),
+        data = df)
+
+
+(test.ph_2 <- cox.zph(coxph_surv_rf2))
+
+
+ggcoxzph(test.ph_2)
 
 
 
 # Model diagnostic --------------------------------------------------------
 
 
+# Do not worry with warnings()
 ggcoxdiagnostics(
   coxph_surv_rf,
   type = "dfbeta",
@@ -197,30 +184,61 @@ ggcoxdiagnostics(
 forestmodel::forest_model(coxph_surv_rf)
 
 
-
-# Comparação par a par
-emmeans(coxph_surv_rf2, pairwise ~ Area_Type)
-
-
-emmeans(coxph_surv_rf2, pairwise ~ Area_Type, type = "response")
-
-
-# efeitos
-emmeans(coxph_surv_rf2, eff ~ Area_Type)
+# Pairwise comparison (Area_Type)
+(pair_em <-
+    emmeans(coxph_surv_rf_of,
+            pairwise ~ Area_Type,
+            adj = "holm"))
 
 
-emmeans(coxph_surv_rf2, eff ~ Area_Type, type = "response")
+(
+  pair_em_r <- emmeans(
+    coxph_surv_rf_of,
+    pairwise ~ Area_Type,
+    type = "response",
+    adj = "holm"
+  )
+)
 
-# dunnet
-emmeans(coxph_surv_rf2, trt.vs.ctrl ~ Area_Type)
+
+pair_em_r |>
+  cld(Letters = letters, reverse = TRUE)
 
 
-emmeans(coxph_surv_rf2, trt.vs.ctrl ~ Area_Type, type = "response")
+# Effects (Area_Type)
+(eff_em <- emmeans(coxph_surv_rf2,
+                   eff ~ Area_Type,
+                   adj = "holm"))
 
 
+(eff_em_r <- emmeans(
+  coxph_surv_rf2,
+  eff ~ Area_Type,
+  type = "response",
+  adj = "holm"
+))
 
-(nd <- ref_grid(coxph_surv_rf2, at = list(x = c(.25, .5, .75)))@grid)
 
+eff_em_r |>
+  cld(Letters = letters, reverse = TRUE)
+
+
+# Like dunnet (Area_Type)
+emmeans(coxph_surv_rf2, trt.vs.ctrl ~ Area_Type, adj = "holm")
+
+
+# Like dunnet: This is what is shown in the graphic (Area_Type)
+emmeans(coxph_surv_rf2,
+        trt.vs.ctrl ~ Area_Type,
+        type = "response",
+        adj = "holm")
+
+
+# This is what is shown in the graphic (Insect).
+emmeans(coxph_surv_rf2,
+        trt.vs.ctrl ~ Insect,
+        type = "response",
+        adj = "holm")
 
 
 # Curves for Area ---------------------------------------------------------
@@ -269,12 +287,9 @@ surv_adjustedcurves(coxph_surv_rf,
        color = NULL)
 
 
-
-
 predict_fun <- function(...) {
   1 - predictRisk(...) # riskRegression package
 }
-
 
 
 adjsurv <- adjustedsurv(
@@ -331,7 +346,6 @@ adjsurv$adjsurv |> # for conf. int. use adjsurv$boot_adjsurv
 # Curves for Insect -------------------------------------------------------
 
 
-
 ggadjustedcurves(coxph_surv_rf,
                  data = df,
                  method = "marginal",
@@ -339,10 +353,8 @@ ggadjustedcurves(coxph_surv_rf,
                  variable = "Insect")
 
 
-
 df |>
   count(Insect)
-
 
 
 surv_adjustedcurves(coxph_surv_rf,
@@ -448,6 +460,9 @@ cox <-
         data = df)
 
 
+summary(cox)
+
+
 mixed_cox <-
   coxme(Surv(Time, Status) ~ Area_Type + Insect + (1 |
                                                      Collection_Int),
@@ -486,8 +501,7 @@ TestRanef <- function(coxphModel, coxmeModel) {
   coxmeLogLik <- coxmeLogLik[2:3]
   ## -2 logLik difference
   logLikNeg2Diff <-
-    c(-2 * (coxphLogLik - coxmeLogLik["Integrated"]),
-      -2 * (coxphLogLik - coxmeLogLik["Penalized"]))
+    c(-2 * (coxphLogLik - coxmeLogLik["Integrated"]),-2 * (coxphLogLik - coxmeLogLik["Penalized"]))
 
   ## p-values
   pVals <-
@@ -516,3 +530,43 @@ cld(em_cox_mixed,
     Letters = letters,
     reverse = TRUE)
 
+
+# Useful links ------------------------------------------------------------
+
+# https://www.drizopoulos.com/courses/emc/basic_surivival_analysis_in_r
+# https://stackoverflow.com/questions/32401706/r-proportional-hazard-assumption-in-coxme/67709136#67709136
+
+# Interpretação dos coeficientes do modelo de cox
+# https://medium.com/swlh/interpreting-cox-proportional-hazards-model-using-colon-dataset-in-r-fda1f9901292
+# https://www.sthda.com/english/wiki/cox-proportional-hazards-model
+# https://stats.stackexchange.com/questions/609091/how-to-interpret-cox-proportional-hazards-model-output-when-running-survival-ana
+
+
+# Artigo
+# https://socialsciences.mcmaster.ca/jfox/Books/Companion/appendices/Appendix-Cox-Regression.pdf
+
+
+# Diagnostico do modelo
+# https://shariq-mohammed.github.io/files/cbsa2019/1-intro-to-survival.html
+
+
+# outra forma de ajuste de modelo cox
+# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
+
+
+# comparação dos efeitos no modelo cox
+# https://stats.stackexchange.com/questions/607076/cox-ph-model-hr-is-it-possible-to-measure-against-the-general-average
+# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
+# https://stackoverflow.com/questions/67915896/pairwise-differences-between-survreg-survival-curves-survival-package-using-em
+
+
+# Teste para o efeito aleatório no modelo de cox
+# https://rpubs.com/kaz_yos/coxme1
+
+
+# plotar curvas
+# https://stackoverflow.com/questions/77654561/plotting-adjusted-survival-curve-for-a-mixed-effects-cox-regression-and-or-time
+
+
+# tidy a cox object
+# https://broom.tidymodels.org/reference/tidy.coxph.html

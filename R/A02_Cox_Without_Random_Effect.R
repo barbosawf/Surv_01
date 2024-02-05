@@ -1,36 +1,3 @@
-# Useful links ------------------------------------------------------------
-
-# https://www.drizopoulos.com/courses/emc/basic_surivival_analysis_in_r
-
-# Interpretação dos coeficientes do modelo de cox
-# https://medium.com/swlh/interpreting-cox-proportional-hazards-model-using-colon-dataset-in-r-fda1f9901292
-# https://www.sthda.com/english/wiki/cox-proportional-hazards-model
-# https://stats.stackexchange.com/questions/609091/how-to-interpret-cox-proportional-hazards-model-output-when-running-survival-ana
-
-# Artigo
-# https://socialsciences.mcmaster.ca/jfox/Books/Companion/appendices/Appendix-Cox-Regression.pdf
-
-
-# Diagnostico do modelo
-# https://shariq-mohammed.github.io/files/cbsa2019/1-intro-to-survival.html
-
-# outra forma de ajuste de modelo cox
-# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
-
-
-# comparação dos efeitos no modelo cox
-# https://stats.stackexchange.com/questions/607076/cox-ph-model-hr-is-it-possible-to-measure-against-the-general-average
-# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
-# https://stackoverflow.com/questions/67915896/pairwise-differences-between-survreg-survival-curves-survival-package-using-em
-
-# Teste para o efeito aleatório no modelo de cox
-# https://rpubs.com/kaz_yos/coxme1
-
-
-# plotar curvas
-# https://stackoverflow.com/questions/77654561/plotting-adjusted-survival-curve-for-a-mixed-effects-cox-regression-and-or-time
-
-
 # Packages ----------------------------------------------------------------
 
 
@@ -355,4 +322,36 @@ surv_adjustedcurves(coxph_surv,
   labs(linetype = NULL,
        color = NULL)
 
+
+# Useful links ------------------------------------------------------------
+
+# https://www.drizopoulos.com/courses/emc/basic_surivival_analysis_in_r
+
+# Interpretação dos coeficientes do modelo de cox
+# https://medium.com/swlh/interpreting-cox-proportional-hazards-model-using-colon-dataset-in-r-fda1f9901292
+# https://www.sthda.com/english/wiki/cox-proportional-hazards-model
+# https://stats.stackexchange.com/questions/609091/how-to-interpret-cox-proportional-hazards-model-output-when-running-survival-ana
+
+# Artigo
+# https://socialsciences.mcmaster.ca/jfox/Books/Companion/appendices/Appendix-Cox-Regression.pdf
+
+
+# Diagnostico do modelo
+# https://shariq-mohammed.github.io/files/cbsa2019/1-intro-to-survival.html
+
+# outra forma de ajuste de modelo cox
+# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
+
+
+# comparação dos efeitos no modelo cox
+# https://stats.stackexchange.com/questions/607076/cox-ph-model-hr-is-it-possible-to-measure-against-the-general-average
+# https://argoshare.is.ed.ac.uk/healthyr_book/cox-proportional-hazards-regression.html
+# https://stackoverflow.com/questions/67915896/pairwise-differences-between-survreg-survival-curves-survival-package-using-em
+
+# Teste para o efeito aleatório no modelo de cox
+# https://rpubs.com/kaz_yos/coxme1
+
+
+# plotar curvas
+# https://stackoverflow.com/questions/77654561/plotting-adjusted-survival-curve-for-a-mixed-effects-cox-regression-and-or-time
 

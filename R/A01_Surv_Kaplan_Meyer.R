@@ -1,15 +1,17 @@
-################################# BROCA ###################################
 # Packages ----------------------------------------------------------------
 
 library(tidyverse)
 library(survival)
 library(survminer)
-library(lme4)
+
+
 
 # Data --------------------------------------------------------------------
 
-data_surv_broca <- readxl::read_excel('Data/Data_All_collections.xlsx',
-                                sheet = "Broca")
+
+data_surv_broca <-
+  readxl::read_excel('Data/Data_All_collections.xlsx',
+                     sheet = "Broca")
 
 
 
@@ -22,41 +24,49 @@ data_surv_broca <- data_surv_broca |>
                          .default = as.integer(.))) |>
   mutate_at(vars(Status), as.integer)
 
-#data_surv |> view()
+
 
 # Kaplan-Meyer Fit --------------------------------------------------------
 
+
 Surv_fit_broca <-
   survfit(Surv(Time, Status) ~ Area_Type, data = data_surv_broca)
+
 
 summary(Surv_fit_broca)
 
 
 # Simple Kaplan-Meyer Plot ------------------------------------------------
 
+
 plot(Surv_fit_broca)
 
 
 # Pairwise contrasts ------------------------------------------------------
 
+
 (Surv_diff_broca <-
    survdiff(Surv(Time, Status) ~ Area_Type, data = data_surv_broca))
 Surv_diff_broca$chisq
+
 
 1 - pchisq(Surv_diff_broca$chisq, df = 2)
 
 
 pairwise_survdiff(Surv(Time, Status) ~ Area_Type,
-                  p.adjust.method ="bonferroni", data = data_surv_broca) ->
+                  p.adjust.method = "bonferroni",
+                  data = data_surv_broca) ->
   pw
 
 pw
 
-na.omit(as.vector(pw$p.value))
 
 qchisq(pw$p.value, df = 1, lower.tail = F)
 
+
+
 # Kaplan-Meyer Survival Plot ----------------------------------------------
+
 
 ggsurvplot(
   # survfit object with calculated statistics.
@@ -72,7 +82,7 @@ ggsurvplot(
   # risk.table.col = "strata",
   risk.table = T,
   # show risk table.
-#  linetype = "strata",
+  #  linetype = "strata",
   # show confidence intervals for
   # point estimates of survival curves.
   conf.int = F,
@@ -109,6 +119,7 @@ ggsurvplot(
 
 ) -> p
 
+
 p$table <- p$table +
   theme(
     plot.title = element_text(
@@ -134,6 +145,7 @@ p$plot <- p$plot +
 
 p
 
+
 ggpubr::ggarrange(
   p$plot,
   p$table,
@@ -156,29 +168,39 @@ ggsave(
   path = 'Graphics'
 )
 
+
 # Cox model ---------------------------------------------------------------
+
 
 data_surv_broca |>
   mutate(Area_Type = factor(Area_Type,
-                            labels = c("Conventional",
-                                       "Agroforestry",
-                                       "Organic"))) |>
+                            labels = c(
+                              "Conventional",
+                              "Agroforestry",
+                              "Organic"
+                            ))) |>
   arrange(Area_Type) -> data_surv_broca_2
+
 
 coxph_surv_broca <-
   coxph(Surv(Time, Status) ~ Area_Type + strata(Collection),
         data = data_surv_broca_2)
 
+
 coxph_surv_broca
+
 
 summary(coxph_surv_broca)
 
 
 # Cox Forest Model --------------------------------------------------------
 
+
 forestmodel::forest_model(coxph_surv_broca)
 
+
 df_broca <- as.data.frame(data_surv_broca_2)
+
 
 df_broca |>
   rename(`strata(Collection)` = Collection) -> df_broca_2
@@ -188,18 +210,25 @@ ggforest(coxph_surv_broca, data = df_broca_2, fontsize = 0.95)
 
 # Cox Survival Plot -------------------------------------------------------
 
-ggadjustedcurves(coxph_surv_broca,
-                 data = df_broca,
-                 method = "conditional",
-                 variable = "Area_Type")
+
+ggadjustedcurves(
+  coxph_surv_broca,
+  data = df_broca,
+  method = "conditional",
+  variable = "Area_Type"
+)
+
 
 data_surv_broca |>
   count(Area_Type)
 
-surv_adjustedcurves(coxph_surv_broca,
-                    data = df_broca,
-                    method = "conditional",
-                    variable = "Area_Type") |>
+
+surv_adjustedcurves(
+  coxph_surv_broca,
+  data = df_broca,
+  method = "conditional",
+  variable = "Area_Type"
+) |>
   mutate(inv_surv = 1 - surv,
          surv_ind = 108 * surv) |>
   mutate(inv_surv_ind = 1080 - surv_ind) |>
@@ -241,10 +270,10 @@ surv_adjustedcurves(coxph_surv_broca,
 
 # Data --------------------------------------------------------------------
 
-data_surv_tenebrio <- readxl::read_excel('Data/Data_All_collections.xlsx',
-                                      sheet = "Tenebrio")
 
-
+data_surv_tenebrio <-
+  readxl::read_excel('Data/Data_All_collections.xlsx',
+                     sheet = "Tenebrio")
 
 
 data_surv_tenebrio <- data_surv_tenebrio |>
@@ -255,38 +284,48 @@ data_surv_tenebrio <- data_surv_tenebrio |>
                          .default = as.integer(.))) |>
   mutate_at(vars(Status), as.integer)
 
-#data_surv |> view()
+
 
 # Kaplan-Meyer Fit --------------------------------------------------------
+
 
 Surv_fit_tenebrio <-
   survfit(Surv(Time, Status) ~ Area_Type, data = data_surv_tenebrio)
 
+
 summary(Surv_fit_tenebrio)
 
 
+
 # Simple Kaplan-Meyer Plot ------------------------------------------------
+
 
 plot(Surv_fit_tenebrio)
 
 
 # Pairwise contrasts ------------------------------------------------------
 
+
 (Surv_diff_tenebrio <-
    survdiff(Surv(Time, Status) ~ Area_Type, data = data_surv_tenebrio))
 Surv_diff_tenebrio$chisq
+
 
 1 - pchisq(Surv_diff_tenebrio$chisq, df = 2)
 
 
 pairwise_survdiff(Surv(Time, Status) ~ Area_Type,
-                  p.adjust.method ="bonferroni", data = data_surv_tenebrio) ->
+                  p.adjust.method = "bonferroni",
+                  data = data_surv_tenebrio) ->
   pw
 
 
 qchisq(pw$p.value, df = 1, lower.tail = F)
 
+
+
 # Kaplan-Meyer Survival Plot ----------------------------------------------
+
 
 ggsurvplot(
   # survfit object with calculated statistics.
@@ -339,6 +378,7 @@ ggsurvplot(
 
 ) -> p
 
+
 p$table <- p$table +
   theme(
     plot.title = element_text(
@@ -364,6 +404,7 @@ p$plot <- p$plot +
 
 p
 
+
 ggpubr::ggarrange(
   p$plot,
   p$table,
@@ -377,6 +418,7 @@ p_with_letters
 
 #dir.create("Graphics")
 
+
 ggsave(
   filename = 'Survival_tenebrio.svg',
   plot = p_with_letters,
@@ -386,50 +428,69 @@ ggsave(
   path = 'Graphics'
 )
 
+
 # Cox model ---------------------------------------------------------------
+
 
 data_surv_tenebrio |>
   mutate(Area_Type = factor(Area_Type,
-                            labels = c("Conventional",
-                                       "Agroforestry",
-                                       "Organic"))) |>
+                            labels = c(
+                              "Conventional",
+                              "Agroforestry",
+                              "Organic"
+                            ))) |>
   arrange(Area_Type) -> data_surv_tenebrio_2
 
 coxph_surv_tenebrio <-
   coxph(Surv(Time, Status) ~ Area_Type + strata(Collection),
         data = data_surv_tenebrio_2)
 
+
 coxph_surv_tenebrio
+
 
 summary(coxph_surv_tenebrio)
 
 
+
 # Cox Forest Model --------------------------------------------------------
+
 
 forestmodel::forest_model(coxph_surv_tenebrio)
 
+
 df_tenebrio <- as.data.frame(data_surv_tenebrio_2)
+
 
 df_tenebrio |>
   rename(`strata(Collection)` = Collection) -> df_tenebrio_2
 
+
 ggforest(coxph_surv_tenebrio, data = df_tenebrio_2, fontsize = 0.95)
+
 
 
 # Cox Survival Plot -------------------------------------------------------
 
-ggadjustedcurves(coxph_surv_tenebrio,
-                 data = df_tenebrio,
-                 method = "conditional",
-                 variable = "Area_Type")
+
+ggadjustedcurves(
+  coxph_surv_tenebrio,
+  data = df_tenebrio,
+  method = "conditional", # marginal
+  variable = "Area_Type"
+)
+
 
 data_surv_tenebrio |>
   count(Area_Type)
 
-surv_adjustedcurves(coxph_surv_tenebrio,
-                    data = df_tenebrio,
-                    method = "conditional",
-                    variable = "Area_Type") |>
+
+surv_adjustedcurves(
+  coxph_surv_tenebrio,
+  data = df_tenebrio,
+  method = "conditional", # marginal
+  variable = "Area_Type"
+) |>
   mutate(inv_surv = 1 - surv,
          surv_ind = 108 * surv) |>
   #mutate(inv_surv_ind = 1080 - surv_ind) |>
